@@ -1,0 +1,62 @@
+obs:
+  sample_interval: 2.0
+  boundary_offset: -2.0
+  n_points_short_term: 4
+  n_points_nearing_boundary: 5
+  n_stored_steps: 5
+  n_observed_steps: 5
+  mask_ref_v: false
+  include_hinge_info: true
+
+vehicle:
+  length: 3.82
+  width: 1.5
+  l_f: 1.17
+  l_r: 1.15
+  rod_len: 24.0
+
+map:
+  sample_gap: 1.0
+  min_lane_width: 2.1
+  min_lane_len: 70.0
+  max_ref_v: 5.5555555556
+  is_constant_ref_v: false
+
+control:
+  dt: 0.05
+  max_speed: 5.0
+  max_acceleration: 3.0
+  max_steering_angle: 0.6108652382
+  use_imu_acceleration: false
+  accel_throttle_gain: 0.32
+  accel_brake_gain: 0.20
+  accel_feedback_gain: 0.18
+  throttle_deadzone: 0.02
+  brake_deadzone: 0.0
+  launch_speed_threshold: 0.8
+  launch_accel_threshold: 0.15
+  launch_throttle: 0.32
+  stanley_heading_gain: 1.0
+  stanley_cross_track_gain: 1.6
+  stanley_feedforward_gain: 0.45
+  stanley_soft_speed: 0.3
+
+controller:
+  mode: actor
+  constant:
+    throttle: 0.15
+    steering: 0.0
+    brake: 0.0
+  actor:
+    checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-12/11-41-19/checkpoints/checkpoint_iter_330_frames_19860000.pt
+    device: cpu
+  front_lookahead:
+    base: 2.5
+    speed_gain: 0.1
+    min: 1.5
+    max: 4.0
+  rear_lookahead:
+    base: 2.0
+    speed_gain: 0.05
+    min: 1.0
+    max: 3.0

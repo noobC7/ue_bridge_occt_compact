@@ -52,27 +52,40 @@ class SteeringAdapter:
 class LowLevelController:
     def __init__(self, control_cfg) -> None:
         self.cfg = control_cfg
-        self.longitudinal = PIDLongitudinalController(
-            kp=control_cfg.speed_pid_kp,
-            ki=control_cfg.speed_pid_ki,
-            kd=control_cfg.speed_pid_kd,
-        )
         self.steering = SteeringAdapter(
             max_steering_angle=control_cfg.max_steering_angle,
             alpha=control_cfg.steering_lowpass_alpha,
         )
 
     def reset(self) -> None:
-        self.longitudinal.reset()
         self.steering.reset()
 
     def step(self, actor_action, state) -> LowLevelCommand:
-        v_target = np.clip(
-            state.speed + actor_action.acceleration_mps2 * self.cfg.dt,
-            0.0,
-            self.cfg.max_speed,
+        heading_vec = np.asarray(
+            [np.cos(state.yaw_map), np.sin(state.yaw_map)],
+            dtype=np.float32,
         )
-        throttle, brake = self.longitudinal.step(state.speed, float(v_target), self.cfg.dt)
+        measured_acc_long = float(np.dot(np.asarray(state.acc_map_xy, dtype=np.float32), heading_vec))
+        desired_acc = float(np.clip(actor_action.acceleration_mps2, -self.cfg.max_acceleration, self.cfg.max_acceleration))
+        acc_error = desired_acc - measured_acc_long
+
+        if desired_acc >= 0.0:
+            throttle = (
+                self.cfg.throttle_deadzone
+                + self.cfg.accel_throttle_gain * desired_acc
+                + self.cfg.accel_feedback_gain * acc_error
+            )
+            if state.speed < self.cfg.launch_speed_threshold and desired_acc > self.cfg.launch_accel_threshold:
+                throttle = max(throttle, self.cfg.launch_throttle)
+            brake = 0.0
+        else:
+            throttle = 0.0
+            brake = (
+                self.cfg.brake_deadzone
+                + self.cfg.accel_brake_gain * (-desired_acc)
+                + self.cfg.accel_feedback_gain * max(-acc_error, 0.0)
+            )
+
         steering = self.steering.step(self.cfg.steering_command_sign * actor_action.front_wheel_angle_rad)
         throttle = float(np.clip(throttle, 0.0, self.cfg.throttle_limit))
         brake = float(np.clip(brake, 0.0, self.cfg.brake_limit))
@@ -238,11 +251,17 @@ class ActorDeploymentController(BaseDeploymentController):
         for agent_index, vehicle_name in enumerate(ordered_names):
             actor_action = self._coerce_actor_action(actor_outputs[vehicle_name])
             state = scene_frame.states[agent_index]
+            heading_vec = np.asarray(
+                [np.cos(state.yaw_map), np.sin(state.yaw_map)],
+                dtype=np.float32,
+            )
+            measured_acc_long = float(np.dot(np.asarray(state.acc_map_xy, dtype=np.float32), heading_vec))
             command = self.low_level[vehicle_name].step(actor_action, state)
             commands[vehicle_name] = command
             self.last_actor_debug_info[vehicle_name] = {
                 "acceleration_mps2": float(actor_action.acceleration_mps2),
                 "front_wheel_angle_rad": float(actor_action.front_wheel_angle_rad),
+                "measured_acc_long": measured_acc_long,
                 "throttle_cmd": float(command.throttle),
                 "brake_cmd": float(command.brake),
                 "steering_cmd": float(command.steering),

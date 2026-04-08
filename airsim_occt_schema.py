@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -96,6 +96,7 @@ class LowLevelCommand:
     throttle: float
     brake: float
     steering: float
+    occt_state: List[bool] = field(default_factory=list)
 
 
 @dataclass

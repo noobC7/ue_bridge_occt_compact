@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -93,6 +93,7 @@ class AirSimOcctMARLEnv:
             self.last_actions[...] = 0.0
         else:
             self.last_actions[...] = np.asarray(actor_actions, dtype=np.float32)
+        self._apply_occt_state(command_map)
         self.io.send_all(command_map)
         if self.cfg.use_sim_pause_clock:
             self.io.advance(self.cfg.control.dt)
@@ -255,6 +256,71 @@ class AirSimOcctMARLEnv:
             state.last_action_steer = float(self.last_actions[index, 1])
             states.append(state)
         return states
+
+    def _apply_occt_state(self, command_map) -> None:
+        occt_state = self._build_occt_state()
+        for command in command_map.values():
+            command.occt_state = list(occt_state)
+
+    def _build_occt_state(self) -> List[bool]:
+        n_agents = self.registry.n_agents
+        if n_agents <= 0:
+            return []
+        if n_agents == 1:
+            return [True]
+        if self.scene_frame is None:
+            return [True] + [False] * max(n_agents - 2, 0) + [True]
+
+        middle_status = self._compute_middle_occt_status()
+        return [True] + middle_status + [True]
+
+    def _compute_middle_occt_status(self) -> List[bool]:
+        n_agents = self.registry.n_agents
+        if n_agents <= 2:
+            return []
+
+        hinge_info = self.history.agent_target_hinge_short_term
+        states = self.scene_frame.states
+        projections = self.scene_frame.projections
+
+        middle_status: List[bool] = []
+        heading_cos_threshold = float(np.cos(np.deg2rad(5.0)))
+        position_threshold = 0.1
+        velocity_threshold = 0.1
+        min_speed_threshold = 1e-6
+
+        for agent_index in range(1, n_agents - 1):
+            target_hinge_status = bool(hinge_info[agent_index, 0, -1] > 0.0)
+            if not target_hinge_status:
+                middle_status.append(False)
+                continue
+
+            agent_pos = np.asarray(states[agent_index].pose_map_xy, dtype=np.float32)
+            agent_vel = np.asarray(states[agent_index].vel_map_xy, dtype=np.float32)
+            agent_vel_mag = float(np.linalg.norm(agent_vel))
+
+            hinge_pos = np.asarray(projections[agent_index].short_term_ref[0, :2], dtype=np.float32)
+            hinge_speed = float(projections[agent_index].short_term_ref[0, 2])
+            hinge_tangent = np.asarray(
+                [
+                    np.cos(projections[agent_index].tangent_yaw),
+                    np.sin(projections[agent_index].tangent_yaw),
+                ],
+                dtype=np.float32,
+            )
+
+            agent_pos_legal = float(np.linalg.norm(agent_pos - hinge_pos)) < position_threshold
+            agent_vel_legal = abs(agent_vel_mag - hinge_speed) < velocity_threshold
+
+            if agent_vel_mag < min_speed_threshold or hinge_speed < min_speed_threshold:
+                agent_heading_legal = False
+            else:
+                agent_tangent = agent_vel / agent_vel_mag
+                agent_heading_legal = float(np.dot(hinge_tangent, agent_tangent)) > heading_cos_threshold
+
+            middle_status.append(bool(agent_pos_legal and agent_heading_legal and agent_vel_legal))
+
+        return middle_status
 
     def _build_obs(self) -> Dict[str, np.ndarray]:
         obs = {}

@@ -349,10 +349,10 @@ class CarControls(MsgpackMixin):
     is_manual_gear = False
     manual_gear = 0
     gear_immediate = True
-    occt_state = [0]*5
+    occt_state = [False] * 5
 
     def __init__(self, throttle = 0, steering = 0, brake = 0,
-        handbrake = False, is_manual_gear = False, manual_gear = 0, gear_immediate = True,occt_state=[0]*5):
+        handbrake = False, is_manual_gear = False, manual_gear = 0, gear_immediate = True, occt_state=None):
         self.throttle = throttle
         self.steering = steering
         self.brake = brake
@@ -360,7 +360,7 @@ class CarControls(MsgpackMixin):
         self.is_manual_gear = is_manual_gear
         self.manual_gear = manual_gear
         self.gear_immediate = gear_immediate
-        self.occt_state = occt_state
+        self.occt_state = list(occt_state) if occt_state is not None else [False] * 5
 
 
 class TrackControls(MsgpackMixin):

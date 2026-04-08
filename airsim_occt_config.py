@@ -45,10 +45,19 @@ class ControlConfig:
     throttle_limit: float = 1.0
     brake_limit: float = 1.0
     steering_command_sign: float = -1.0
+    accel_throttle_gain: float = 0.32
+    accel_brake_gain: float = 0.20
+    accel_feedback_gain: float = 0.18
+    throttle_deadzone: float = 0.02
+    brake_deadzone: float = 0.0
+    launch_speed_threshold: float = 0.8
+    launch_accel_threshold: float = 0.15
+    launch_throttle: float = 0.32
     stanley_heading_gain: float = 1.0
     stanley_cross_track_gain: float = 1.2
     stanley_feedforward_gain: float = 0.35
     stanley_soft_speed: float = 0.5
+    use_imu_acceleration: bool = False
 
 
 @dataclass

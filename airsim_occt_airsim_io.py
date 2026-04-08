@@ -52,12 +52,16 @@ class AirSimIO:
         gps = self.client.getGpsData(vehicle_name=vehicle_name)
         timestamp = float(getattr(imu, "time_stamp", 0)) or time.time()
         pose_world_xy = np.asarray([pose.position.x_val, pose.position.y_val], dtype=np.float32)
+        yaw_world = self._quat_to_yaw(pose.orientation)
         vel_world_xy = np.asarray([kin.linear_velocity.x_val, kin.linear_velocity.y_val], dtype=np.float32)
-        acc_world_xy = np.asarray([kin.linear_acceleration.x_val, kin.linear_acceleration.y_val], dtype=np.float32)
         imu_acc_body = np.asarray(
             [imu.linear_acceleration.x_val, imu.linear_acceleration.y_val],
             dtype=np.float32,
         )
+        if getattr(self.cfg.control, "use_imu_acceleration", False):
+            acc_world_xy = self._rotate_body_to_world_xy(imu_acc_body, yaw_world)
+        else:
+            acc_world_xy = np.asarray([kin.linear_acceleration.x_val, kin.linear_acceleration.y_val], dtype=np.float32)
         imu_gyro_body = np.asarray(
             [imu.angular_velocity.x_val, imu.angular_velocity.y_val],
             dtype=np.float32,
@@ -66,7 +70,7 @@ class AirSimIO:
             vehicle_name=vehicle_name,
             timestamp=float(timestamp),
             pose_world_xy=pose_world_xy,
-            yaw_world=self._quat_to_yaw(pose.orientation),
+            yaw_world=yaw_world,
             z_world=float(pose.position.z_val),
             vel_world_xy=vel_world_xy,
             acc_world_xy=acc_world_xy,
@@ -81,6 +85,7 @@ class AirSimIO:
         controls.throttle = float(cmd.throttle)
         controls.brake = float(cmd.brake)
         controls.steering = float(cmd.steering)
+        controls.occt_state = [bool(value) for value in cmd.occt_state]
         self.client.setCarControls(controls, vehicle_name)
 
     def send_all(self, command_map: Dict[str, LowLevelCommand]) -> None:
@@ -172,6 +177,13 @@ class AirSimIO:
             return None
         geo = gps.gnss.geo_point
         return np.asarray([geo.latitude, geo.longitude, geo.altitude], dtype=np.float64)
+
+    def _rotate_body_to_world_xy(self, vec_body_xy: np.ndarray, yaw_world: float) -> np.ndarray:
+        vec = np.asarray(vec_body_xy, dtype=np.float32)
+        c = float(math.cos(yaw_world))
+        s = float(math.sin(yaw_world))
+        rot = np.asarray([[c, -s], [s, c]], dtype=np.float32)
+        return rot @ vec
 
     def _vehicle_sort_key(self, vehicle_name: str):
         prefix = vehicle_name.rstrip('0123456789')

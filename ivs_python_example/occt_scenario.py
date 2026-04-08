@@ -2858,10 +2858,11 @@ class Scenario(BaseScenario):
         target_hinge_speed = torch.linalg.norm(target_hinge_vel, dim=-1)
         agent_speed = torch.linalg.norm(agent.state.vel, dim=-1)
         hinge_speed_error_sq = (agent_speed - target_hinge_speed) ** 2
+        hinge_vel_mask = hinge_status & (weight_distance < 0.5)
         reward_track_hinge_vel = 1 - torch.clamp(
             self.rewards.reward_track_hinge_vel * hinge_speed_error_sq,
             max=1.0,
-        ) * hinge_status
+        ) * hinge_vel_mask
         reward_details["reward_track_hinge_vel"][:, agent_index] = reward_track_hinge_vel
 
         hinge_once = self.ref_paths_agent_related.agent_hinge_status.get_latest(n=1)[:, agent_index] & (

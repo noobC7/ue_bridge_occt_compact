@@ -47,7 +47,7 @@ control:
   stanley_soft_speed: 0.3
 
 controller:
-  mode: constant
+  mode: mppi
   constant:
     throttle: 0.15
     steering: 0.0
@@ -55,6 +55,13 @@ controller:
   actor:
     checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-04/19-14-19_mlp_ippo_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
     device: cpu
+  mppi:
+    device: cpu
+    horizon_steps: 3
+    num_samples: 256
+    lambda: 10.0
+    exploration: 0.1
+    debug_top_k: 8
   front_lookahead:
     base: 2.5
     speed_gain: 0.1

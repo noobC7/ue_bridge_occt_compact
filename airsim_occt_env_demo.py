@@ -10,10 +10,16 @@ import setup_vsim
 from airsim_occt_airsim_io import AirSimIO
 from airsim_occt_calibration import AlignmentCalibrator
 from airsim_occt_config import EnvConfig, MapConfig, VehicleConfig
-from airsim_occt_controllers import ActorDeploymentController, ConstantLowLevelController, FrontRearCooperativeController
+from airsim_occt_controllers import (
+    ActorDeploymentController,
+    CenterlineMPPIController,
+    CenterlinePIDController,
+    ConstantLowLevelController,
+    FrontRearCooperativeController,
+)
 from airsim_occt_fleet_registry import FleetRegistry
 from airsim_occt_schema import ActorAction, Transform2D
-from airsim_occt_obs_manifest import NEIGHBOR_BLOCK_ORDER, SELF_BLOCK_ORDER, build_obs_layout
+from airsim_occt_obs_manifest import build_obs_layout
 from airsim_occt_plotting import build_start_aligned_world_to_map, get_selected_road_metadata
 from airsim_occt_tracking_recorder import TrackingLogRecorder, make_output_dir
 
@@ -82,14 +88,22 @@ def build_env_config(args, algo_cfg) -> EnvConfig:
     cfg.obs.n_points_nearing_boundary = obs_algo["n_points_nearing_boundary"]
     cfg.obs.n_stored_steps = obs_algo["n_stored_steps"]
     cfg.obs.n_observed_steps = obs_algo["n_observed_steps"]
+    cfg.obs.n_nearing_agents_observed = obs_algo.get("n_nearing_agents_observed", cfg.obs.n_nearing_agents_observed)
     cfg.obs.mask_ref_v = obs_algo["mask_ref_v"]
     cfg.obs.include_hinge_info = obs_algo["include_hinge_info"]
+    cfg.obs.hinge_edge_buffer = obs_algo.get("hinge_edge_buffer")
     control_algo = algo_cfg["control"]
     cfg.control.dt = control_algo["dt"]
     cfg.control.max_speed = control_algo["max_speed"]
     cfg.control.max_acceleration = control_algo["max_acceleration"]
     cfg.control.max_steering_angle = control_algo["max_steering_angle"]
     cfg.control.use_imu_acceleration = control_algo["use_imu_acceleration"]
+    if "steering_estimation_time_constant" in control_algo:
+        cfg.control.steering_estimation_time_constant = control_algo["steering_estimation_time_constant"]
+    if "steering_estimation_max_rate" in control_algo:
+        cfg.control.steering_estimation_max_rate = control_algo["steering_estimation_max_rate"]
+    if "steering_estimation_max_angle" in control_algo:
+        cfg.control.steering_estimation_max_angle = control_algo["steering_estimation_max_angle"]
     cfg.control.accel_throttle_gain = control_algo["accel_throttle_gain"]
     cfg.control.accel_brake_gain = control_algo["accel_brake_gain"]
     cfg.control.accel_feedback_gain = control_algo["accel_feedback_gain"]
@@ -158,25 +172,14 @@ def print_obs_block_summary(obs_dict, obs_cfg, agent_index: int) -> None:
     obs = np.asarray(obs_dict[vehicle_name], dtype=np.float32)
     print(f"[DEMO] block summary for {vehicle_name}")
     cursor = 0
-    for block_name in SELF_BLOCK_ORDER:
-        dim = layout.self_block_dims[block_name]
-        if dim <= 0:
-            continue
+    for block_name in layout.actor_block_order:
+        dim = layout.full_block_dims[block_name]
         block = obs[cursor:cursor + dim]
         print(
-            f"  self::{block_name} dim={dim} mean={float(block.mean()):.6f} "
+            f"  {block_name} dim={dim} mean={float(block.mean()):.6f} "
             f"max_abs={float(np.abs(block).max()):.6f} head={np.round(block[:min(6, dim)], 4).tolist()}"
         )
         cursor += dim
-    for neighbor_prefix in ["front", "rear"]:
-        for block_name in NEIGHBOR_BLOCK_ORDER:
-            dim = layout.neighbor_block_dims[block_name]
-            block = obs[cursor:cursor + dim]
-            print(
-                f"  {neighbor_prefix}::{block_name} dim={dim} mean={float(block.mean()):.6f} "
-                f"max_abs={float(np.abs(block).max()):.6f} head={np.round(block[:min(6, dim)], 4).tolist()}"
-            )
-            cursor += dim
 
 
 def build_zero_actions(vehicle_names):
@@ -203,6 +206,25 @@ def build_demo_controller(args, cfg, vehicle_names, algo_cfg):
             control_cfg=cfg.control,
             vehicle_names=vehicle_names,
             device=actor_cfg["device"],
+        )
+    elif controller_mode == "pid":
+        middle_controller = CenterlinePIDController(
+            registry=FleetRegistry(cfg.vehicle_configs),
+            control_cfg=cfg.control,
+            sample_interval=cfg.obs.sample_interval,
+        )
+    elif controller_mode == "mppi":
+        mppi_cfg = controller_cfg.get("mppi", {})
+        middle_controller = CenterlineMPPIController(
+            registry=FleetRegistry(cfg.vehicle_configs),
+            control_cfg=cfg.control,
+            sample_interval=cfg.obs.sample_interval,
+            device=mppi_cfg.get("device", "cpu"),
+            horizon_steps=mppi_cfg.get("horizon_steps", 3),
+            num_samples=mppi_cfg.get("num_samples", 256),
+            param_lambda=mppi_cfg.get("lambda", 10.0),
+            exploration=mppi_cfg.get("exploration", 0.1),
+            debug_top_k=mppi_cfg.get("debug_top_k", 8),
         )
     else:
         raise ValueError(f"Unsupported controller_mode: {controller_mode}")
@@ -308,6 +330,7 @@ def main() -> int:
     parser.add_argument("--print-tracking-debug", action="store_true")
     parser.add_argument("--no-save-tracking-log", action="store_true")
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--output-suffix", default=None)
     args = parser.parse_args()
 
     map_dir = Path(args.map_dir)
@@ -356,11 +379,15 @@ def main() -> int:
     env = AirSimOcctMARLEnv(cfg, road=road, transform=transform)
     tracking_recorder = None
     if (not args.no_save_tracking_log) and args.step_count > 0:
-        output_dir = make_output_dir(args.output_dir, prefix="tracking")
+        output_dir = make_output_dir(args.output_dir, prefix="tracking", suffix=args.output_suffix)
         tracking_recorder = TrackingLogRecorder(
             output_dir=output_dir,
             metadata={
                 "vehicles": args.vehicles,
+                "map_dir": str(map_dir),
+                "road_env_index": int(args.road_env_index),
+                "output_suffix": args.output_suffix,
+                "method": algo_cfg.get("controller", {}).get("mode"),
                 "road_metadata": metadata,
                 "algorithm_config_path": str(algo_config_path),
                 "algorithm_config": algo_cfg,
@@ -452,6 +479,21 @@ def main() -> int:
                         is_persistent=True,
                         clear_existing=not args.plot_road,
                     )
+                is_done = any(bool(value) for value in terminated.values())
+                is_truncated = any(bool(value) for value in truncated.values())
+                if is_done or is_truncated:
+                    done_reason = info.get("done_reason", "terminated" if is_done else "truncated")
+                    terminal_vehicle_names = info.get("terminal_vehicle_names", [])
+                    print(
+                        f"[DEMO] resetting at step={step_idx} "
+                        f"reason={done_reason} terminal_vehicle_names={terminal_vehicle_names}"
+                    )
+                    obs_dict, reset_info = env.reset()
+                    demo_controller.reset()
+                    print(f"[DEMO] reset() after terminal event, vehicles={reset_info.get('vehicle_names')}")
+                    if args.print_obs_debug:
+                        print_obs_summary(obs_dict, preview_dim=args.preview_dim)
+                    continue
         if tracking_recorder is not None:
             log_path = tracking_recorder.save()
             print(f"[DEMO] tracking log saved to {log_path}")

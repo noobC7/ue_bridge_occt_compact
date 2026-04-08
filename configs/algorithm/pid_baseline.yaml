@@ -47,7 +47,7 @@ control:
   stanley_soft_speed: 0.3
 
 controller:
-  mode: constant
+  mode: pid
   constant:
     throttle: 0.15
     steering: 0.0

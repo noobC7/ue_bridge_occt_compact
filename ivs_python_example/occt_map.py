@@ -376,7 +376,8 @@ class OcctCRMap(MapBase):
                  is_constant_ref_v: bool = False,
                  rod_len = None,
                  extend_len = None,
-                 n_agents: int = 4): # 采样间隔
+                 n_agents: int = 4,
+                 target_road_id=None): # 采样间隔
         """
         初始化道路类，使用CommonRoad地图并基于torchcubicspline实现路径表示
         
@@ -421,7 +422,7 @@ class OcctCRMap(MapBase):
             raise ValueError("No paths found in the provided CommonRoad map directory")
         
         # 初始化路径样条
-        self.reset_splines()
+        self.reset_splines(target_road_id=target_road_id)
 
     def get_lane_width(self,type="mean") -> Tensor:
         """
@@ -1206,7 +1207,7 @@ class OcctCRMap(MapBase):
         """
         map_name = self.batch_map_name[env_index]
         return self.scenario_library[map_name]
-    def reset_splines(self):
+    def reset_splines(self, target_road_id=None):
         """
         生成batch_dim长度的随机整型tensor，范围0到道路库数量-1
         使用torchcubicspline初始化路径样条
@@ -1231,8 +1232,12 @@ class OcctCRMap(MapBase):
         self.batch_s_max = torch.empty(B, device=self.device).fill_(float('nan'))
         self.batch_map_name = [None]*B
         self.batch_corner_s = torch.zeros(B, device=self.device)
+        self.batch_corner_s_begin = torch.zeros(B, device=self.device)
+        self.batch_corner_s_end = torch.zeros(B, device=self.device)
         max_s_len=0
         max_s_len_id=0
+        if target_road_id is not None and self.batch_dim > 0:
+            self.batch_id[0] = torch.tensor(int(target_road_id), dtype=torch.int64, device=self.device)
         for batch_idx, path_id in enumerate(self.batch_id):
             path_id = path_id.item()
             self.batch_map_name[batch_idx] = self.path_library[path_id]["map_name"]
@@ -1250,7 +1255,11 @@ class OcctCRMap(MapBase):
             self.batch_s_max[batch_idx] = s_max
             self.batch_ref_v[batch_idx, :length, 0] = path_data["ref_v"]
             #self.batch_hinge_status[batch_idx, :length, :] = path_data["hinge_status"].transpose(0, 1) #[length, n_agents]
-            self.batch_corner_s[batch_idx] = (path_data["corner_begin_s"] + path_data["corner_end_s"]) / 2
+            self.batch_corner_s_begin[batch_idx] = path_data["corner_begin_s"]
+            self.batch_corner_s_end[batch_idx] = path_data["corner_end_s"]
+            self.batch_corner_s[batch_idx] = 0.5 * (
+                self.batch_corner_s_begin[batch_idx] + self.batch_corner_s_end[batch_idx]
+            )
         # 对长度不足的道路样本进行延伸填充
         for batch_idx in range(B):
             current_length = torch.count_nonzero(~torch.isnan(self.batch_center_vertices[batch_idx, :, 0])).item()

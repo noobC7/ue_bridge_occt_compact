@@ -36,7 +36,7 @@ class AirSimOcctMARLEnv:
         first_vehicle = self.registry.config_of(0)
         agent_length = first_vehicle.length
         agent_width = first_vehicle.width
-        self.obs_core = SharedObsCore(env_cfg.obs, env_cfg.control, self.registry)
+        self.obs_core = SharedObsCore(env_cfg.obs, env_cfg.control, self.registry, projector=self.projector)
         self.normalizers = self.obs_core.build_normalizers(
             agent_length=agent_length,
             agent_width=agent_width,
@@ -53,6 +53,8 @@ class AirSimOcctMARLEnv:
             for vehicle_name in self.registry.vehicle_names
         }
         self.last_actions = np.zeros((self.registry.n_agents, 2), dtype=np.float32)
+        self.target_front_wheel_angles = np.zeros((self.registry.n_agents,), dtype=np.float32)
+        self.estimated_front_wheel_angles = np.zeros((self.registry.n_agents,), dtype=np.float32)
         self.scene_frame: Optional[SceneFrame] = None
 
     def reset(self):
@@ -62,6 +64,8 @@ class AirSimOcctMARLEnv:
         if self.cfg.use_sim_pause_clock:
             self.io.pause(True)
         self.last_actions[...] = 0.0
+        self.target_front_wheel_angles[...] = 0.0
+        self.estimated_front_wheel_angles[...] = 0.0
         for controller in self.controllers.values():
             controller.reset()
         raw_states = self.io.read_all(self.registry.vehicle_names)
@@ -97,6 +101,8 @@ class AirSimOcctMARLEnv:
         self.io.send_all(command_map)
         if self.cfg.use_sim_pause_clock:
             self.io.advance(self.cfg.control.dt)
+        self.target_front_wheel_angles[...] = self._extract_target_front_wheel_angles(command_map)
+        self._update_estimated_front_wheel_angles()
         raw_states = self.io.read_all(self.registry.vehicle_names)
         states = self._canonicalize(raw_states)
         prev_s = [projection.s for projection in self.scene_frame.projections]
@@ -105,9 +111,15 @@ class AirSimOcctMARLEnv:
         self.scene_frame = SceneFrame(states=states, projections=projections, timestamp=raw_states[0].timestamp)
         obs = self._build_obs()
         reward = self._build_dummy_reward()
-        terminated = self._build_dummy_done(False)
+        goal_done, terminal_vehicle_names, s_max, goal_tolerance_s = self._check_goal_done()
+        terminated = self._build_dummy_done(goal_done)
         truncated = self._build_dummy_done(False)
         info = self._build_info()
+        info["road_s_max"] = float(s_max)
+        info["goal_tolerance_s"] = float(goal_tolerance_s)
+        if goal_done:
+            info["done_reason"] = "goal_reached"
+            info["terminal_vehicle_names"] = list(terminal_vehicle_names)
         return obs, reward, terminated, truncated, info
 
     def step_with_controller(self, deployment_controller: BaseDeploymentController):
@@ -119,7 +131,8 @@ class AirSimOcctMARLEnv:
             scene_frame=self.scene_frame,
             vehicle_names=self.registry.vehicle_names,
         )
-        result = self.step_low_level(command_map, actor_actions=None)
+        actor_actions = self._extract_actor_actions_from_controller(deployment_controller)
+        result = self.step_low_level(command_map, actor_actions=actor_actions)
         controller_debug = getattr(deployment_controller, 'last_debug_info', None)
         if controller_debug:
             result[4]['controller_debug'] = controller_debug
@@ -251,11 +264,59 @@ class AirSimOcctMARLEnv:
         states = []
         for index, raw_state in enumerate(raw_states):
             state = self.transformer.convert(raw_state, agent_index=index)
-            state.steering_feedback = float(self.last_actions[index, 1])
+            state.steering_feedback = float(self.estimated_front_wheel_angles[index])
+            state.steering_target_rad = float(self.target_front_wheel_angles[index])
             state.last_action_acc = float(self.last_actions[index, 0])
             state.last_action_steer = float(self.last_actions[index, 1])
             states.append(state)
         return states
+
+    def _extract_target_front_wheel_angles(self, command_map) -> np.ndarray:
+        target = np.zeros((self.registry.n_agents,), dtype=np.float32)
+        steering_sign = float(getattr(self.cfg.control, "steering_command_sign", -1.0))
+        estimation_max_angle = getattr(self.cfg.control, "steering_estimation_max_angle", None)
+        if estimation_max_angle is None:
+            estimation_max_angle = self.cfg.control.max_steering_angle
+        for agent_index, vehicle_name in self.registry.ordered_pairs():
+            command = command_map.get(vehicle_name)
+            if command is None:
+                continue
+            normalized_steering = float(command.steering)
+            target[agent_index] = float(
+                np.clip(
+                    normalized_steering * float(estimation_max_angle) / steering_sign,
+                    -float(estimation_max_angle),
+                    float(estimation_max_angle),
+                )
+            )
+        return target
+
+    def _update_estimated_front_wheel_angles(self) -> None:
+        dt = float(self.cfg.control.dt)
+        tau = float(getattr(self.cfg.control, "steering_estimation_time_constant", 0.12))
+        max_rate = float(getattr(self.cfg.control, "steering_estimation_max_rate", 1.5707963268))
+        estimation_max_angle = getattr(self.cfg.control, "steering_estimation_max_angle", None)
+        if estimation_max_angle is None:
+            estimation_max_angle = self.cfg.control.max_steering_angle
+        tau = max(tau, 1e-6)
+        delta_dot_cmd = (self.target_front_wheel_angles - self.estimated_front_wheel_angles) / tau
+        delta_dot = np.clip(delta_dot_cmd, -max_rate, max_rate)
+        self.estimated_front_wheel_angles[...] = np.clip(
+            self.estimated_front_wheel_angles + delta_dot * dt,
+            -float(estimation_max_angle),
+            float(estimation_max_angle),
+        ).astype(np.float32)
+
+    def _extract_actor_actions_from_controller(self, deployment_controller: BaseDeploymentController) -> np.ndarray:
+        actor_actions = np.zeros((self.registry.n_agents, 2), dtype=np.float32)
+        actor_action_map = getattr(deployment_controller, "last_actor_action_map", {}) or {}
+        for agent_index, vehicle_name in self.registry.ordered_pairs():
+            actor_action = actor_action_map.get(vehicle_name)
+            if actor_action is None:
+                continue
+            actor_actions[agent_index, 0] = float(actor_action.acceleration_mps2)
+            actor_actions[agent_index, 1] = float(actor_action.front_wheel_angle_rad)
+        return actor_actions
 
     def _apply_occt_state(self, command_map) -> None:
         occt_state = self._build_occt_state()
@@ -270,62 +331,14 @@ class AirSimOcctMARLEnv:
             return [True]
         if self.scene_frame is None:
             return [True] + [False] * max(n_agents - 2, 0) + [True]
-
-        middle_status = self._compute_middle_occt_status()
+        middle_status = self.history.agent_hinge_status.latest()[1:-1].astype(bool).tolist()
         return [True] + middle_status + [True]
-
-    def _compute_middle_occt_status(self) -> List[bool]:
-        n_agents = self.registry.n_agents
-        if n_agents <= 2:
-            return []
-
-        hinge_info = self.history.agent_target_hinge_short_term
-        states = self.scene_frame.states
-        projections = self.scene_frame.projections
-
-        middle_status: List[bool] = []
-        heading_cos_threshold = float(np.cos(np.deg2rad(5.0)))
-        position_threshold = 0.1
-        velocity_threshold = 0.1
-        min_speed_threshold = 1e-6
-
-        for agent_index in range(1, n_agents - 1):
-            target_hinge_status = bool(hinge_info[agent_index, 0, -1] > 0.0)
-            if not target_hinge_status:
-                middle_status.append(False)
-                continue
-
-            agent_pos = np.asarray(states[agent_index].pose_map_xy, dtype=np.float32)
-            agent_vel = np.asarray(states[agent_index].vel_map_xy, dtype=np.float32)
-            agent_vel_mag = float(np.linalg.norm(agent_vel))
-
-            hinge_pos = np.asarray(projections[agent_index].short_term_ref[0, :2], dtype=np.float32)
-            hinge_speed = float(projections[agent_index].short_term_ref[0, 2])
-            hinge_tangent = np.asarray(
-                [
-                    np.cos(projections[agent_index].tangent_yaw),
-                    np.sin(projections[agent_index].tangent_yaw),
-                ],
-                dtype=np.float32,
-            )
-
-            agent_pos_legal = float(np.linalg.norm(agent_pos - hinge_pos)) < position_threshold
-            agent_vel_legal = abs(agent_vel_mag - hinge_speed) < velocity_threshold
-
-            if agent_vel_mag < min_speed_threshold or hinge_speed < min_speed_threshold:
-                agent_heading_legal = False
-            else:
-                agent_tangent = agent_vel / agent_vel_mag
-                agent_heading_legal = float(np.dot(hinge_tangent, agent_tangent)) > heading_cos_threshold
-
-            middle_status.append(bool(agent_pos_legal and agent_heading_legal and agent_vel_legal))
-
-        return middle_status
 
     def _build_obs(self) -> Dict[str, np.ndarray]:
         obs = {}
         for agent_index, vehicle_name in self.registry.ordered_pairs():
-            obs_vec = self.obs_core.encode(agent_index, self.history)
+            current_state = self.scene_frame.states[agent_index] if self.scene_frame is not None else None
+            obs_vec = self.obs_core.encode(agent_index, self.history, state=current_state)
             if obs_vec.shape[0] != self.layout.total_dim:
                 raise ValueError(
                     f"observation dim mismatch for {vehicle_name}, expected {self.layout.total_dim}, got {obs_vec.shape[0]}"
@@ -339,9 +352,24 @@ class AirSimOcctMARLEnv:
     def _build_dummy_done(self, value: bool) -> Dict[str, bool]:
         return {vehicle_name: value for vehicle_name in self.registry.vehicle_names}
 
+    def _check_goal_done(self) -> tuple[bool, List[str], float, float]:
+        if self.scene_frame is None:
+            return False, [], float(self.projector.s_max), 0.75
+        s_max = float(self.projector.s_max)
+        goal_tolerance_s = 0.75
+        terminal_vehicle_names = [
+            vehicle_name
+            for index, vehicle_name in self.registry.ordered_pairs()
+            if float(self.scene_frame.projections[index].s) >= (s_max - goal_tolerance_s)
+        ]
+        return bool(terminal_vehicle_names), terminal_vehicle_names, s_max, goal_tolerance_s
+
     def _build_info(self) -> Dict:
         if self.scene_frame is None:
             return {}
+        agent_hinge_status = self.history.agent_hinge_status.latest().astype(bool).tolist()
+        hinge_ready_status = self.history.hinge_status.astype(bool).tolist()
+        occt_state = self._build_occt_state()
         return {
             "s": {vehicle_name: float(self.scene_frame.projections[index].s) for index, vehicle_name in self.registry.ordered_pairs()},
             "pose_map_xy": {
@@ -362,6 +390,27 @@ class AirSimOcctMARLEnv:
             },
             "speed": {
                 vehicle_name: float(self.scene_frame.states[index].speed)
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "steering_feedback": {
+                vehicle_name: float(self.scene_frame.states[index].steering_feedback)
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "steering_target_rad": {
+                vehicle_name: float(self.scene_frame.states[index].steering_target_rad)
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "road_s_max": float(self.projector.s_max),
+            "occt_state": {
+                vehicle_name: bool(occt_state[index])
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "agent_hinge_status": {
+                vehicle_name: bool(agent_hinge_status[index])
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "hinge_ready_status": {
+                vehicle_name: bool(hinge_ready_status[index])
                 for index, vehicle_name in self.registry.ordered_pairs()
             },
         }

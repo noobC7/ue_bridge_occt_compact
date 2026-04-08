@@ -19,10 +19,13 @@ def _to_builtin(value):
     return value
 
 
-def make_output_dir(base_dir=None, prefix="tracking_run"):
+def make_output_dir(base_dir=None, prefix="tracking_run", suffix=None):
     base = Path(base_dir) if base_dir else Path.cwd() / "airsim_occt_tracking_outputs"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = base / f"{prefix}_{timestamp}"
+    dir_name = f"{prefix}_{timestamp}"
+    if suffix:
+        dir_name = f"{dir_name}_{suffix}"
+    out_dir = base / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 

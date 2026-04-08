@@ -64,6 +64,7 @@ class CanonicalVehicleState:
     acc_map_xy: np.ndarray
     speed: float
     steering_feedback: float = 0.0
+    steering_target_rad: float = 0.0
     last_action_acc: float = 0.0
     last_action_steer: float = 0.0
 

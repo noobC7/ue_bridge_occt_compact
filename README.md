@@ -35,6 +35,7 @@
 ue_bridge_occt_compact/
 ├── airsim_occt_env.py              # 多智能体强化学习环境主类
 ├── airsim_occt_env_demo.py         # 演示和测试程序
+├── airsim_occt_batch_eval.py       # 多方法多道路批量测试脚本
 ├── airsim_occt_config.py           # 配置管理（环境/车辆/控制/观察）
 ├── airsim_occt_controllers.py      # 控制器实现
 ├── airsim_occt_airsim_io.py        # AirSim通信接口
@@ -49,8 +50,10 @@ ue_bridge_occt_compact/
 ├── airsim_occt_plot_actor_log.py   # 日志可视化工具
 ├── configs/                        # 配置文件目录
 │   └── algorithm/                 # 算法配置
-│       ├── default.yaml           # 默认配置
-│       ├── actor_baseline.yaml    # Actor模型基线
+│       ├── default.yaml           # 默认MARL配置
+│       ├── actor_baseline.yaml    # MARL/Actor模型基线
+│       ├── pid_baseline.yaml      # PID基线
+│       ├── mppi_baseline.yaml     # MPPI基线
 │       └── constant_baseline.yaml # 恒定控制基线
 ├── ivs_python_example/            # IVS示例代码
 │   ├── mappo_ippo_occt.py        # MAPPO/IPPO训练算法
@@ -78,6 +81,8 @@ ue_bridge_occt_compact/
 - `SteeringAdapter`：转向控制适配器
 - `ConstantController`：恒定速度控制
 - `ActorModelController`：预训练模型控制
+- `CenterlinePIDController`：中心线跟踪PID/Stanley基线
+- `CenterlineMPPIController`：中心线跟踪MPPI基线
 
 ### AirSim接口 (`airsim_occt_airsim_io.py`)
 处理与AirSim的通信，包括车辆状态读取、控制命令发送、坐标转换和数据同步。
@@ -87,101 +92,135 @@ ue_bridge_occt_compact/
 
 ## 快速开始
 
-### 安装依赖
+### 运行环境
 
 ```bash
-pip install airsim torch numpy pyyaml matplotlib msgpack-rpc
+conda activate /home/yons/Graduation/pyquaticus/env-full
+cd /home/yons/Graduation/ue_bridge_occt_compact
 ```
 
-### 基本使用
+当前默认配置 `configs/algorithm/default.yaml` 使用最新的 MARL checkpoint：
 
-```python
-from airsim_occt_env_demo import create_env_and_run
-
-# 运行演示程序
-create_env_and_run(
-    config_path='configs/algorithm/default.yaml',
-    controller_type='constant',  # 或 'actor'
-    actor_model_path=None,       # Actor模型路径
-    num_steps=1000
-)
+```text
+/home/yons/Graduation/rl_occt/outputs/2026-04-04/19-14-19_mlp_ippo_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 ```
 
-### 配置文件示例
+### 连通性自检
+
+在启动 UE/AirSim 后，先检查车辆状态是否能正常读取：
+
+```bash
+python airsim_occt_smoke_test.py \
+  --host 127.0.0.1 \
+  --port 41451 \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --count 3
+```
+
+### 单次运行
+
+#### MARL
+
+```bash
+python airsim_occt_env_demo.py \
+  --algo-config configs/algorithm/default.yaml \
+  --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
+  --road-env-index 1 \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --step-count 200 \
+  --plot-road \
+  --output-suffix marl_road1
+```
+
+#### PID
+
+```bash
+python airsim_occt_env_demo.py \
+  --algo-config configs/algorithm/pid_baseline.yaml \
+  --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
+  --road-env-index 1 \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --step-count 200 \
+  --plot-road \
+  --output-suffix pid_road1
+```
+
+#### MPPI
+
+```bash
+python airsim_occt_env_demo.py \
+  --algo-config configs/algorithm/mppi_baseline.yaml \
+  --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
+  --road-env-index 1 \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --step-count 200 \
+  --plot-road \
+  --output-suffix mppi_road1
+```
+
+### 日志命名
 
 ```yaml
-# configs/algorithm/default.yaml
-env:
-  map_path: "path/to/map.xml"
-  n_vehicles: 4
-  dt: 0.1
-
-vehicles:
-  - name: "leader"
-    init_position: [0, 0, 0]
-    init_speed: 10.0
-  - name: "follower1"
-    init_position: [-5, 0, 0]
-    init_speed: 10.0
-
-control:
-  longitudinal:
-    kp: 0.5
-    ki: 0.1
-    kd: 0.0
-  lateral:
-    k_gain: 2.0
+tracking_YYYYMMDD_HHMMSS_<method>_roadX
 ```
 
-## 使用示例
+例如：
 
-### 演示程序
+```text
+tracking_20260408_220104_pid_road0
+```
+
+## 批量测试
+
+对 `PID / MPPI / MARL` 三种方法在 `road0..5` 上批量测试：
 
 ```bash
-# 运行恒定速度控制
-python airsim_occt_env_demo.py --config configs/algorithm/constant_baseline.yaml
-
-# 运行Actor模型控制
-python airsim_occt_env_demo.py --config configs/algorithm/actor_baseline.yaml --model path/to/actor.pth
+python airsim_occt_batch_eval.py \
+  --methods pid mppi marl \
+  --roads 0 1 2 3 4 5 \
+  --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --step-count 200 \
+  --output-dir /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs
 ```
 
-### 可视化
+如果希望某条路失败后继续后面的组合，追加：
 
 ```bash
-# 可视化运行日志
-python airsim_occt_plot_actor_log.py --log_path airsim_occt_tracking_outputs/
+--continue-on-error
 ```
+
+## 日志绘图
+
+统一使用一个脚本绘制 actor 和铰接状态图：
+
+```bash
+python airsim_occt_plot_actor_log.py \
+  --log-file /path/to/tracking_log.json \
+  --modes actor hinge
+```
+
+只画 actor：
+
+```bash
+python airsim_occt_plot_actor_log.py \
+  --log-file /path/to/tracking_log.json \
+  --modes actor
+```
+
+只画铰接状态：
+
+```bash
+python airsim_occt_plot_actor_log.py \
+  --log-file /path/to/tracking_log.json \
+  --modes hinge
+```
+
+输出图保存在对应 tracking 目录下的 `plots/` 子目录。
 
 ## 训练和部署
 
-### MAPPO/IPPO训练
-
-```bash
-cd ivs_python_example
-python mappo_ippo_occt.py --config config/mappo_occt_3_followers
-```
-
-### 训练特性
-
-- 支持MAPPO（共享参数）和IPPO（独立参数）
-- 基于TorchRL框架实现
-- 使用VMAS仿真器进行高效并行训练
-- 支持中心化和去中心化Critic网络
-
-### 观察空间
-
-- **自身状态**：位置、速度、加速度
-- **邻居车辆**：相对距离、相对速度
-- **道路信息**：短期路径点、曲率
-- **历史信息**：过去N步的状态
-
-### 奖励函数
-
-- 路径跟踪奖励（横向误差）
-- 速度跟踪奖励
-- 车间距保持奖励
-- 碰撞惩罚
-- 编队协同奖励
+训练相关脚本仍保留在 `ivs_python_example/` 与上游 `rl_occt/` 中；本仓库当前重点是 AirSim/IVS 部署桥接、日志记录和多方法道路测试。
 
 ## 项目特点
 

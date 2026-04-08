@@ -44,12 +44,13 @@ class ObservationHistory:
         n_agents = int(self.n_agents)
         n_short = int(self.obs_cfg.n_points_short_term)
         n_boundary = int(self.obs_cfg.n_points_nearing_boundary)
+        n_near = int(self.obs_cfg.n_nearing_agents_observed)
 
         self.past_pos = CircularArray(np.zeros((n_store, n_agents, n_agents, 2), dtype=np.float32))
         self.past_rot = CircularArray(np.zeros((n_store, n_agents, n_agents), dtype=np.float32))
         self.past_vel = CircularArray(np.zeros((n_store, n_agents, n_agents, 2), dtype=np.float32))
         self.past_steering = CircularArray(np.zeros((n_store, n_agents), dtype=np.float32))
-        self.past_short_term_ref_points = CircularArray(
+        self.past_relative_ref_info = CircularArray(
             np.zeros((n_store, n_agents, n_agents, n_short, 3), dtype=np.float32)
         )
         self.past_left_boundary = CircularArray(
@@ -73,10 +74,28 @@ class ObservationHistory:
         self.past_distance_to_right_boundary = CircularArray(
             np.zeros((n_store, n_agents), dtype=np.float32)
         )
-        self.error_space = CircularArray(np.zeros((n_store, n_agents, 2), dtype=np.float32))
+        self.past_platoon_error_vel = CircularArray(
+            np.zeros((n_store, n_agents, 2), dtype=np.float32)
+        )
+        self.past_hinge_error_vel = CircularArray(
+            np.zeros((n_store, n_agents, 2), dtype=np.float32)
+        )
+        self.self_platoon_error_space = CircularArray(
+            np.zeros((n_store, n_agents, 2), dtype=np.float32)
+        )
+        self.agent_hinge_status = CircularArray(np.zeros((2, n_agents), dtype=np.bool_))
+
+        # Keep these aliases to make the old debug helpers easier to keep working.
+        self.past_short_term_ref_points = self.past_relative_ref_info
+        self.error_space = self.self_platoon_error_space
+
         self.error_vel = np.zeros((n_agents, 2), dtype=np.float32)
+        self.platoon_error_vel = np.zeros((n_agents, 2), dtype=np.float32)
+        self.hinge_error_vel = np.zeros((n_agents, 2), dtype=np.float32)
         self.agent_s = np.zeros((n_agents,), dtype=np.float32)
-        self.agent_target_hinge_short_term = np.zeros((n_agents, n_short, 5), dtype=np.float32)
+        self.hinge_status = np.zeros((n_agents,), dtype=np.bool_)
+        self.hinge_short_term = np.zeros((n_agents, n_short, 5), dtype=np.float32)
+        self.n_selected_neighbors = n_near
 
     def set_agent_s(self, s_values: np.ndarray) -> None:
         values = np.asarray(s_values, dtype=np.float32)
@@ -94,10 +113,9 @@ class ObservationHistory:
         return float(self.past_distance_to_agents.latest()[ego_index, other_index])
 
     def latest_self_ref(self, agent_index: int) -> np.ndarray:
-        return self.past_short_term_ref_points.latest()[agent_index, agent_index]
+        return self.past_relative_ref_info.latest()[agent_index, agent_index]
 
     def latest_self_boundary(self, agent_index: int) -> Tuple[np.ndarray, np.ndarray]:
         left = self.past_left_boundary.latest()[agent_index, agent_index]
         right = self.past_right_boundary.latest()[agent_index, agent_index]
         return left, right
-

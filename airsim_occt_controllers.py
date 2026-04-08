@@ -124,54 +124,62 @@ class SharedCheckpointActor:
         action_scale: np.ndarray,
         device: str = "cpu",
     ) -> None:
+        import re
         import torch
         import torch.nn as nn
 
         checkpoint = torch.load(checkpoint_path, map_location=device)
         policy_state_dict = checkpoint["policy_state_dict"]
-        supported_prefix = "module.0.module.0.group_mlp_0.params"
-        if not any(key.startswith(supported_prefix) for key in policy_state_dict.keys()):
+        layer_pattern = re.compile(r"^(?P<prefix>.+\.params)\.(?P<index>\d+)\.(?P<kind>weight|bias)$")
+        grouped_layers = {}
+        for key, value in policy_state_dict.items():
+            matched = layer_pattern.match(key)
+            if matched is None:
+                continue
+            prefix = matched.group("prefix")
+            index = int(matched.group("index"))
+            grouped_layers.setdefault(prefix, {})[(index, matched.group("kind"))] = value
+        if not grouped_layers:
             raise ValueError(
-                "Checkpoint format is not the expected shared GroupSharedMLP layout. "
-                "This wrapper currently supports the shared-parameter actor checkpoint used in mappo_occt_3_followers."
+                "Unsupported checkpoint format: no shared MLP parameter block ending with '.params' was found."
             )
 
-        weight0 = policy_state_dict[f"{supported_prefix}.0.weight"]
-        weight1 = policy_state_dict[f"{supported_prefix}.2.weight"]
-        weight2 = policy_state_dict[f"{supported_prefix}.4.weight"]
-        bias0 = policy_state_dict[f"{supported_prefix}.0.bias"]
-        bias1 = policy_state_dict[f"{supported_prefix}.2.bias"]
-        bias2 = policy_state_dict[f"{supported_prefix}.4.bias"]
+        supported_prefix = max(
+            grouped_layers.keys(),
+            key=lambda prefix: len([index for index, kind in grouped_layers[prefix] if kind == "weight"]),
+        )
+        layer_entries = grouped_layers[supported_prefix]
+        layer_indices = sorted({index for index, kind in layer_entries if kind == "weight"})
+        weights = [layer_entries[(index, "weight")] for index in layer_indices]
+        biases = [layer_entries[(index, "bias")] for index in layer_indices]
 
-        obs_dim = int(weight0.shape[1])
-        hidden_dim0 = int(weight0.shape[0])
-        hidden_dim1 = int(weight1.shape[0])
-        output_dim = int(weight2.shape[0])
+        obs_dim = int(weights[0].shape[1])
+        output_dim = int(weights[-1].shape[0])
         if output_dim % 2 != 0:
             raise ValueError(f"Actor output dim must be even, got {output_dim}")
         self.obs_dim = obs_dim
         self.action_dim = output_dim // 2
         self.device = device
         self.torch = torch
-        self.model = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim0),
-            nn.Tanh(),
-            nn.Linear(hidden_dim0, hidden_dim1),
-            nn.Tanh(),
-            nn.Linear(hidden_dim1, output_dim),
-        ).to(device)
+        modules = []
+        for layer_pos, weight in enumerate(weights):
+            in_features = int(weight.shape[1])
+            out_features = int(weight.shape[0])
+            modules.append(nn.Linear(in_features, out_features))
+            if layer_pos != len(weights) - 1:
+                modules.append(nn.Tanh())
+        self.model = nn.Sequential(*modules).to(device)
         with torch.no_grad():
-            self.model[0].weight.copy_(weight0.to(device))
-            self.model[0].bias.copy_(bias0.to(device))
-            self.model[2].weight.copy_(weight1.to(device))
-            self.model[2].bias.copy_(bias1.to(device))
-            self.model[4].weight.copy_(weight2.to(device))
-            self.model[4].bias.copy_(bias2.to(device))
+            linear_modules = [module for module in self.model if isinstance(module, nn.Linear)]
+            for module, weight, bias in zip(linear_modules, weights, biases):
+                module.weight.copy_(weight.to(device))
+                module.bias.copy_(bias.to(device))
         self.model.eval()
         self.action_scale = torch.as_tensor(action_scale, dtype=torch.float32, device=device)
         self.checkpoint_path = checkpoint_path
         self.iteration = checkpoint.get("iteration")
         self.total_frames = checkpoint.get("total_frames")
+        self.parameter_prefix = supported_prefix
 
     def act(self, obs_batch: np.ndarray) -> np.ndarray:
         obs_np = np.asarray(obs_batch, dtype=np.float32)
@@ -198,6 +206,7 @@ class ActorDeploymentController(BaseDeploymentController):
         self.expected_obs_dim: Optional[int] = None
         self.metadata: Dict = {}
         self.last_actor_debug_info: Dict[str, Dict] = {}
+        self.last_actor_action_map: Dict[str, ActorAction] = {}
 
     @classmethod
     def from_checkpoint(
@@ -236,6 +245,7 @@ class ActorDeploymentController(BaseDeploymentController):
             "total_frames": actor.total_frames,
             "obs_dim": actor.obs_dim,
             "action_dim": actor.action_dim,
+            "parameter_prefix": actor.parameter_prefix,
         }
         return controller
 
@@ -248,8 +258,10 @@ class ActorDeploymentController(BaseDeploymentController):
         commands = {}
         ordered_names = list(vehicle_names)
         self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
         for agent_index, vehicle_name in enumerate(ordered_names):
             actor_action = self._coerce_actor_action(actor_outputs[vehicle_name])
+            self.last_actor_action_map[vehicle_name] = actor_action
             state = scene_frame.states[agent_index]
             heading_vec = np.asarray(
                 [np.cos(state.yaw_map), np.sin(state.yaw_map)],
@@ -343,6 +355,7 @@ class FrontRearReferencePlanner:
         rear_lookahead_speed_gain: float = 0.3,
         rear_lookahead_min: float = 2.5,
         rear_lookahead_max: float = 8.0,
+        controlled_indices: Optional[Iterable[int]] = None,
     ) -> None:
         self.registry = registry
         self.sample_interval = float(sample_interval)
@@ -354,6 +367,7 @@ class FrontRearReferencePlanner:
         self.rear_lookahead_speed_gain = float(rear_lookahead_speed_gain)
         self.rear_lookahead_min = float(rear_lookahead_min)
         self.rear_lookahead_max = float(rear_lookahead_max)
+        self.controlled_indices = None if controlled_indices is None else list(controlled_indices)
 
     def plan(self, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, ReferenceTarget]:
         ordered_names = list(vehicle_names)
@@ -437,6 +451,8 @@ class FrontRearReferencePlanner:
         )
 
     def _controlled_indices(self, n_agents: int) -> List[int]:
+        if self.controlled_indices is not None:
+            return [index for index in self.controlled_indices if 0 <= index < n_agents]
         if n_agents <= 0:
             return []
         if n_agents == 1:
@@ -528,6 +544,198 @@ class TractorStanleyController:
         return command, debug
 
 
+class CenterlinePIDController(BaseDeploymentController):
+    def __init__(
+        self,
+        registry,
+        control_cfg,
+        sample_interval: float,
+        front_lookahead_base: float = 6.0,
+        front_lookahead_speed_gain: float = 0.8,
+        front_lookahead_min: float = 4.0,
+        front_lookahead_max: float = 14.0,
+        rear_lookahead_base: float = 4.0,
+        rear_lookahead_speed_gain: float = 0.3,
+        rear_lookahead_min: float = 2.5,
+        rear_lookahead_max: float = 8.0,
+    ) -> None:
+        self.registry = registry
+        self.controlled_indices = self._controlled_indices(registry.n_agents)
+        self.planner = FrontRearReferencePlanner(
+            registry=registry,
+            sample_interval=sample_interval,
+            front_lookahead_base=front_lookahead_base,
+            front_lookahead_speed_gain=front_lookahead_speed_gain,
+            front_lookahead_min=front_lookahead_min,
+            front_lookahead_max=front_lookahead_max,
+            rear_lookahead_base=rear_lookahead_base,
+            rear_lookahead_speed_gain=rear_lookahead_speed_gain,
+            rear_lookahead_min=rear_lookahead_min,
+            rear_lookahead_max=rear_lookahead_max,
+            controlled_indices=self.controlled_indices,
+        )
+        self.trackers = {
+            agent_index: TractorStanleyController(control_cfg, registry.config_of(agent_index))
+            for agent_index in self.controlled_indices
+        }
+        self.metadata = {
+            "type": "CenterlinePIDController",
+            "controlled_indices": list(self.controlled_indices),
+        }
+        self.last_debug_info: Dict[str, TrackingDebugInfo] = {}
+        self.last_actor_debug_info: Dict[str, Dict] = {}
+        self.last_actor_action_map: Dict[str, ActorAction] = {}
+
+    def reset(self) -> None:
+        for tracker in self.trackers.values():
+            tracker.reset()
+        self.last_debug_info = {}
+        self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
+
+    def compute_commands(self, obs_dict, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, LowLevelCommand]:
+        del obs_dict
+        ordered_names = list(vehicle_names)
+        targets = self.planner.plan(scene_frame, ordered_names)
+        commands: Dict[str, LowLevelCommand] = {}
+        self.last_debug_info = {}
+        self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
+        for vehicle_name, target in targets.items():
+            state = scene_frame.states[target.agent_index]
+            command, debug = self.trackers[target.agent_index].compute_command(state, target)
+            commands[vehicle_name] = command
+            self.last_debug_info[vehicle_name] = debug
+        return commands
+
+    def _controlled_indices(self, n_agents: int) -> List[int]:
+        if n_agents <= 2:
+            return []
+        return list(range(1, n_agents - 1))
+
+
+class CenterlineMPPIController(BaseDeploymentController):
+    def __init__(
+        self,
+        registry,
+        control_cfg,
+        sample_interval: float,
+        device: str = "cpu",
+        horizon_steps: int = 3,
+        num_samples: int = 256,
+        param_lambda: float = 10.0,
+        exploration: float = 0.1,
+        debug_top_k: int = 8,
+    ) -> None:
+        import importlib.util
+        from pathlib import Path
+
+        import torch
+
+        module_path = Path("/home/yons/Graduation/VMAS_occt/vmas/scenarios/simple_mppi.py")
+        spec = importlib.util.spec_from_file_location("vmas_simple_mppi", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load SimpleMPPIController from {module_path}")
+        simple_mppi_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(simple_mppi_module)
+        SimpleMPPIController = simple_mppi_module.SimpleMPPIController
+
+        self.registry = registry
+        self.sample_interval = float(sample_interval)
+        self.control_cfg = control_cfg
+        self.device = device
+        self.controlled_indices = self._controlled_indices(registry.n_agents)
+        self.low_level = {
+            agent_index: LowLevelController(control_cfg)
+            for agent_index in self.controlled_indices
+        }
+        vehicle_cfg = registry.config_of(0)
+        self.simple_mppi = SimpleMPPIController(
+            num_agents=registry.n_agents,
+            device=torch.device(device),
+            dt=float(control_cfg.dt),
+            l_f=float(vehicle_cfg.l_f),
+            l_r=float(vehicle_cfg.l_r),
+            max_steer_abs=float(control_cfg.max_steering_angle),
+            max_accel_abs=float(control_cfg.max_acceleration),
+            max_speed=float(control_cfg.max_speed),
+            horizon_step_T=int(horizon_steps),
+            number_of_samples_K=int(num_samples),
+            param_exploration=float(exploration),
+            param_lambda=float(param_lambda),
+            debug_top_k=int(debug_top_k),
+        )
+        self.metadata = {
+            "type": "CenterlineMPPIController",
+            "controlled_indices": list(self.controlled_indices),
+            "device": device,
+            "horizon_steps": int(horizon_steps),
+            "num_samples": int(num_samples),
+            "lambda": float(param_lambda),
+            "exploration": float(exploration),
+        }
+        self.last_actor_debug_info: Dict[str, Dict] = {}
+        self.last_actor_action_map: Dict[str, ActorAction] = {}
+
+    def reset(self) -> None:
+        self.simple_mppi.reset()
+        for controller in self.low_level.values():
+            controller.reset()
+        self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
+
+    def compute_commands(self, obs_dict, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, LowLevelCommand]:
+        del obs_dict
+        ordered_names = list(vehicle_names)
+        commands: Dict[str, LowLevelCommand] = {}
+        self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
+        for agent_index in self.controlled_indices:
+            vehicle_name = ordered_names[agent_index]
+            state = scene_frame.states[agent_index]
+            projection = scene_frame.projections[agent_index]
+            ref_points = projection.short_term_ref[:, :2]
+            ref_speeds = projection.short_term_ref[:, 2]
+            observed_x = np.asarray(
+                [state.pose_map_xy[0], state.pose_map_xy[1], state.yaw_map, state.speed],
+                dtype=np.float32,
+            )
+            action, _, _ = self.simple_mppi.command(
+                agent_idx=agent_index,
+                observed_x=observed_x,
+                ref_points=ref_points,
+                ref_speeds=ref_speeds,
+            )
+            actor_action = ActorAction(
+                acceleration_mps2=float(action[1].item() if hasattr(action[1], "item") else action[1]),
+                front_wheel_angle_rad=float(action[0].item() if hasattr(action[0], "item") else action[0]),
+            )
+            self.last_actor_action_map[vehicle_name] = actor_action
+            command = self.low_level[agent_index].step(actor_action, state)
+            heading_vec = np.asarray(
+                [np.cos(state.yaw_map), np.sin(state.yaw_map)],
+                dtype=np.float32,
+            )
+            measured_acc_long = float(np.dot(np.asarray(state.acc_map_xy, dtype=np.float32), heading_vec))
+            commands[vehicle_name] = command
+            self.last_actor_debug_info[vehicle_name] = {
+                "acceleration_mps2": float(actor_action.acceleration_mps2),
+                "front_wheel_angle_rad": float(actor_action.front_wheel_angle_rad),
+                "measured_acc_long": measured_acc_long,
+                "throttle_cmd": float(command.throttle),
+                "brake_cmd": float(command.brake),
+                "steering_cmd": float(command.steering),
+                "current_speed": float(state.speed),
+                "controller_type": "mppi",
+            }
+        return commands
+
+    def _controlled_indices(self, n_agents: int) -> List[int]:
+        if n_agents <= 2:
+            return []
+        return list(range(1, n_agents - 1))
+
+
 class FrontRearCooperativeController(BaseDeploymentController):
     def __init__(
         self,
@@ -593,6 +801,7 @@ class FrontRearCooperativeController(BaseDeploymentController):
             self.metadata["middle_metadata"] = getattr(middle_controller, "metadata")
         self.last_debug_info: Dict[str, TrackingDebugInfo] = {}
         self.last_actor_debug_info: Dict[str, Dict] = {}
+        self.last_actor_action_map: Dict[str, ActorAction] = {}
 
     def reset(self) -> None:
         if self.middle_controller is not None:
@@ -604,9 +813,11 @@ class FrontRearCooperativeController(BaseDeploymentController):
         ordered_names = list(vehicle_names)
         commands = {}
         self.last_actor_debug_info = {}
+        self.last_actor_action_map = {}
         if self.middle_controller is not None:
             middle_commands = self.middle_controller.compute_commands(obs_dict, scene_frame, ordered_names)
             self.last_actor_debug_info = getattr(self.middle_controller, "last_actor_debug_info", {})
+            self.last_actor_action_map = getattr(self.middle_controller, "last_actor_action_map", {})
             for agent_index, vehicle_name in enumerate(ordered_names):
                 if agent_index not in self._controlled_indices(len(ordered_names)) and vehicle_name in middle_commands:
                     commands[vehicle_name] = middle_commands[vehicle_name]

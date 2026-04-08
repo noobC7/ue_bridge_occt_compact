@@ -15,6 +15,7 @@ class VehicleConfig:
 @dataclass
 class ObsConfig:
     n_agents: int = 1
+    n_nearing_agents_observed: int = 2
     n_points_short_term: int = 4
     n_points_nearing_boundary: int = 5
     n_stored_steps: int = 5
@@ -27,6 +28,7 @@ class ObsConfig:
     is_add_noise: bool = False
     desired_gap_s: float = 6.0
     include_hinge_info: bool = True
+    hinge_edge_buffer: Optional[float] = None
     obs_relative_velocity_scale: Optional[float] = None
     obs_relative_acceleration_scale: Optional[float] = None
 
@@ -38,6 +40,9 @@ class ControlConfig:
     max_acceleration: float = 3.0
     max_steering_angle: float = 0.6108652382
     max_steering_rate: float = 0.6108652382
+    steering_estimation_time_constant: float = 0.12
+    steering_estimation_max_rate: float = 1.5707963268
+    steering_estimation_max_angle: Optional[float] = None
     speed_pid_kp: float = 1.0
     speed_pid_ki: float = 0.0
     speed_pid_kd: float = 0.0

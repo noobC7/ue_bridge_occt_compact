@@ -189,7 +189,7 @@ def build_zero_actions(vehicle_names):
     }
 
 
-def build_demo_controller(args, cfg, vehicle_names, algo_cfg):
+def build_demo_controller(args, cfg, vehicle_names, algo_cfg, projector=None):
     controller_cfg = algo_cfg["controller"]
     controller_mode = controller_cfg["mode"]
     if controller_mode == "constant":
@@ -219,6 +219,7 @@ def build_demo_controller(args, cfg, vehicle_names, algo_cfg):
             registry=FleetRegistry(cfg.vehicle_configs),
             control_cfg=cfg.control,
             sample_interval=cfg.obs.sample_interval,
+            projector=projector,
             device=mppi_cfg.get("device", "cpu"),
             horizon_steps=mppi_cfg.get("horizon_steps", 3),
             num_samples=mppi_cfg.get("num_samples", 256),
@@ -409,6 +410,7 @@ def main() -> int:
         if args.print_obs_debug:
             print_obs_block_summary(obs_dict, cfg.obs, agent_index=args.inspect_agent_index)
         if args.plot_road or args.plot_observation_points or args.plot_all_observation_points:
+            env.io.flush_persistent_markers()
             env.render_debug_markers(
                 plot_road=args.plot_road,
                 plot_observation_points=args.plot_all_observation_points,
@@ -417,7 +419,7 @@ def main() -> int:
                 point_size=args.point_size,
                 duration=args.plot_duration,
                 is_persistent=True,
-                clear_existing=True,
+                clear_existing=False,
             )
             if args.plot_observation_points and not args.plot_all_observation_points:
                 env.plot_agent_observation_points(
@@ -426,7 +428,7 @@ def main() -> int:
                     point_size=args.point_size,
                     duration=args.plot_duration,
                     is_persistent=True,
-                    clear_existing=not args.plot_road,
+                    clear_existing=False,
                 )
             print(
                 f"[DEMO] rendered debug markers: plot_road={args.plot_road} "
@@ -434,7 +436,13 @@ def main() -> int:
                 f"plot_single_observation={args.plot_observation_points and not args.plot_all_observation_points}"
             )
         if args.step_count > 0:
-            demo_controller = build_demo_controller(args, cfg, reset_info.get('vehicle_names'), algo_cfg)
+            demo_controller = build_demo_controller(
+                args,
+                cfg,
+                reset_info.get('vehicle_names'),
+                algo_cfg,
+                projector=env.projector,
+            )
             demo_controller.reset()
             controller_mode = algo_cfg["controller"]["mode"]
             if controller_mode == "actor":
@@ -459,16 +467,16 @@ def main() -> int:
                     print_actor_debug(info)
                 if args.print_obs_debug:
                     print_obs_block_summary(obs_dict, cfg.obs, agent_index=args.inspect_agent_index)
-                if args.plot_road or args.plot_all_observation_points:
+                if args.plot_all_observation_points:
                     env.render_debug_markers(
-                        plot_road=args.plot_road,
-                        plot_observation_points=args.plot_all_observation_points,
+                        plot_road=False,
+                        plot_observation_points=True,
                         plot_z=args.plot_z,
                         road_thickness=3.0,
                         point_size=args.point_size,
                         duration=args.plot_duration,
                         is_persistent=True,
-                        clear_existing=True,
+                        clear_existing=not args.plot_road,
                     )
                 if args.plot_observation_points and not args.plot_all_observation_points:
                     env.plot_agent_observation_points(

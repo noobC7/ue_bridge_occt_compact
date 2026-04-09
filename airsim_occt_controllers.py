@@ -620,6 +620,7 @@ class CenterlineMPPIController(BaseDeploymentController):
         registry,
         control_cfg,
         sample_interval: float,
+        projector,
         device: str = "cpu",
         horizon_steps: int = 3,
         num_samples: int = 256,
@@ -643,6 +644,9 @@ class CenterlineMPPIController(BaseDeploymentController):
         self.registry = registry
         self.sample_interval = float(sample_interval)
         self.control_cfg = control_cfg
+        if projector is None:
+            raise ValueError("CenterlineMPPIController requires a valid road projector")
+        self.projector = projector
         self.device = device
         self.controlled_indices = self._controlled_indices(registry.n_agents)
         self.low_level = {
@@ -690,12 +694,11 @@ class CenterlineMPPIController(BaseDeploymentController):
         commands: Dict[str, LowLevelCommand] = {}
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
+        target_agent_s = self._get_dynamic_target_arc_positions(scene_frame)
         for agent_index in self.controlled_indices:
             vehicle_name = ordered_names[agent_index]
             state = scene_frame.states[agent_index]
-            projection = scene_frame.projections[agent_index]
-            ref_points = projection.short_term_ref[:, :2]
-            ref_speeds = projection.short_term_ref[:, 2]
+            ref_points, ref_speeds = self._build_platoon_reference(scene_frame, agent_index, target_agent_s)
             observed_x = np.asarray(
                 [state.pose_map_xy[0], state.pose_map_xy[1], state.yaw_map, state.speed],
                 dtype=np.float32,
@@ -727,8 +730,30 @@ class CenterlineMPPIController(BaseDeploymentController):
                 "steering_cmd": float(command.steering),
                 "current_speed": float(state.speed),
                 "controller_type": "mppi",
+                "target_s": float(target_agent_s[agent_index]),
             }
         return commands
+
+    def _get_dynamic_target_arc_positions(self, scene_frame) -> np.ndarray:
+        s_front = float(scene_frame.projections[0].s)
+        s_rear = float(scene_frame.projections[-1].s)
+        if self.registry.n_agents <= 1:
+            return np.asarray([s_front], dtype=np.float32)
+        desired_gap_s = (s_front - s_rear) / max(self.registry.n_agents - 1, 1)
+        agent_indices = np.arange(self.registry.n_agents, dtype=np.float32)
+        return (s_front - desired_gap_s * agent_indices).astype(np.float32)
+
+    def _build_platoon_reference(self, scene_frame, agent_index: int, target_agent_s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        front_index = max(agent_index - 1, 0)
+        front_vehicle_speed = max(float(scene_frame.states[front_index].speed), 1e-3)
+        query_interval = max(front_vehicle_speed * float(self.control_cfg.dt), 1e-3)
+        query_s = self.projector._clamp_s(
+            target_agent_s[agent_index]
+            + np.arange(self.simple_mppi.T + 1, dtype=np.float32) * query_interval
+        )
+        ref_points = self.projector._query_xy(self.projector.center_xy, query_s).astype(np.float32)
+        ref_speeds = np.full((self.simple_mppi.T + 1,), front_vehicle_speed, dtype=np.float32)
+        return ref_points, ref_speeds
 
     def _controlled_indices(self, n_agents: int) -> List[int]:
         if n_agents <= 2:

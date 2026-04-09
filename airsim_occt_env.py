@@ -1,3 +1,4 @@
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -56,9 +57,15 @@ class AirSimOcctMARLEnv:
         self.target_front_wheel_angles = np.zeros((self.registry.n_agents,), dtype=np.float32)
         self.estimated_front_wheel_angles = np.zeros((self.registry.n_agents,), dtype=np.float32)
         self.scene_frame: Optional[SceneFrame] = None
+        self._has_reset_once = False
 
     def reset(self):
         self.io.connect()
+        if self._has_reset_once:
+            if self.cfg.use_sim_pause_clock:
+                self.io.pause(False)
+            self.io.reset()
+            time.sleep(1.0)
         if self.cfg.enable_api_control:
             self.io.enable_api(self.registry.vehicle_names)
         if self.cfg.use_sim_pause_clock:
@@ -74,6 +81,7 @@ class AirSimOcctMARLEnv:
         self.history.reset()
         self.obs_core.update(self.history, states, projections, self.last_actions)
         self.scene_frame = SceneFrame(states=states, projections=projections, timestamp=raw_states[0].timestamp)
+        self._has_reset_once = True
         return self._build_obs(), {"vehicle_names": self.registry.vehicle_names}
 
     def step(self, action_dict: Dict[str, ActorAction]):

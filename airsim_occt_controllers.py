@@ -550,6 +550,7 @@ class CenterlinePIDController(BaseDeploymentController):
         registry,
         control_cfg,
         sample_interval: float,
+        platoon_position_gain: float = 0.8,
         front_lookahead_base: float = 6.0,
         front_lookahead_speed_gain: float = 0.8,
         front_lookahead_min: float = 4.0,
@@ -560,6 +561,8 @@ class CenterlinePIDController(BaseDeploymentController):
         rear_lookahead_max: float = 8.0,
     ) -> None:
         self.registry = registry
+        self.control_cfg = control_cfg
+        self.platoon_position_gain = float(platoon_position_gain)
         self.controlled_indices = self._controlled_indices(registry.n_agents)
         self.planner = FrontRearReferencePlanner(
             registry=registry,
@@ -581,6 +584,7 @@ class CenterlinePIDController(BaseDeploymentController):
         self.metadata = {
             "type": "CenterlinePIDController",
             "controlled_indices": list(self.controlled_indices),
+            "platoon_position_gain": self.platoon_position_gain,
         }
         self.last_debug_info: Dict[str, TrackingDebugInfo] = {}
         self.last_actor_debug_info: Dict[str, Dict] = {}
@@ -597,11 +601,22 @@ class CenterlinePIDController(BaseDeploymentController):
         del obs_dict
         ordered_names = list(vehicle_names)
         targets = self.planner.plan(scene_frame, ordered_names)
+        target_agent_s = self._get_dynamic_target_arc_positions(scene_frame)
         commands: Dict[str, LowLevelCommand] = {}
         self.last_debug_info = {}
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
         for vehicle_name, target in targets.items():
+            front_speed = float(scene_frame.states[target.agent_index - 1].speed)
+            s_error = float(target_agent_s[target.agent_index] - target.current_s)
+            target.target_s = float(target_agent_s[target.agent_index])
+            target.reference_speed = float(
+                np.clip(
+                    front_speed + self.platoon_position_gain * s_error,
+                    0.0,
+                    self.control_cfg.max_speed,
+                )
+            )
             state = scene_frame.states[target.agent_index]
             command, debug = self.trackers[target.agent_index].compute_command(state, target)
             commands[vehicle_name] = command
@@ -612,6 +627,15 @@ class CenterlinePIDController(BaseDeploymentController):
         if n_agents <= 2:
             return []
         return list(range(1, n_agents - 1))
+
+    def _get_dynamic_target_arc_positions(self, scene_frame) -> np.ndarray:
+        s_front = float(scene_frame.projections[0].s)
+        s_rear = float(scene_frame.projections[-1].s)
+        if self.registry.n_agents <= 1:
+            return np.asarray([s_front], dtype=np.float32)
+        desired_gap_s = (s_front - s_rear) / max(self.registry.n_agents - 1, 1)
+        agent_indices = np.arange(self.registry.n_agents, dtype=np.float32)
+        return (s_front - desired_gap_s * agent_indices).astype(np.float32)
 
 
 class CenterlineMPPIController(BaseDeploymentController):
@@ -680,6 +704,7 @@ class CenterlineMPPIController(BaseDeploymentController):
         }
         self.last_actor_debug_info: Dict[str, Dict] = {}
         self.last_actor_action_map: Dict[str, ActorAction] = {}
+        self.last_mppi_debug_info: Dict[str, Dict] = {}
 
     def reset(self) -> None:
         self.simple_mppi.reset()
@@ -687,6 +712,7 @@ class CenterlineMPPIController(BaseDeploymentController):
             controller.reset()
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
+        self.last_mppi_debug_info = {}
 
     def compute_commands(self, obs_dict, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, LowLevelCommand]:
         del obs_dict
@@ -694,6 +720,7 @@ class CenterlineMPPIController(BaseDeploymentController):
         commands: Dict[str, LowLevelCommand] = {}
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
+        self.last_mppi_debug_info = {}
         target_agent_s = self._get_dynamic_target_arc_positions(scene_frame)
         for agent_index in self.controlled_indices:
             vehicle_name = ordered_names[agent_index]
@@ -709,6 +736,7 @@ class CenterlineMPPIController(BaseDeploymentController):
                 ref_points=ref_points,
                 ref_speeds=ref_speeds,
             )
+            mppi_debug = self.simple_mppi.last_debug.get(agent_index, {})
             actor_action = ActorAction(
                 acceleration_mps2=float(action[1].item() if hasattr(action[1], "item") else action[1]),
                 front_wheel_angle_rad=float(action[0].item() if hasattr(action[0], "item") else action[0]),
@@ -731,6 +759,14 @@ class CenterlineMPPIController(BaseDeploymentController):
                 "current_speed": float(state.speed),
                 "controller_type": "mppi",
                 "target_s": float(target_agent_s[agent_index]),
+            }
+            self.last_mppi_debug_info[vehicle_name] = {
+                "target_s": float(target_agent_s[agent_index]),
+                "ref_points": np.asarray(mppi_debug.get("ref_points", ref_points), dtype=np.float32),
+                "ref_speeds": np.asarray(mppi_debug.get("ref_speeds", ref_speeds), dtype=np.float32),
+                "optimal_traj": np.asarray(mppi_debug.get("optimal_traj", np.zeros((0, 4), dtype=np.float32)), dtype=np.float32),
+                #"sampled_trajs": np.asarray(mppi_debug.get("sampled_trajs", np.zeros((0, 0, 4), dtype=np.float32)), dtype=np.float32),
+                "costs": np.asarray(mppi_debug.get("costs", np.zeros((0,), dtype=np.float32)), dtype=np.float32),
             }
         return commands
 
@@ -827,22 +863,26 @@ class FrontRearCooperativeController(BaseDeploymentController):
         self.last_debug_info: Dict[str, TrackingDebugInfo] = {}
         self.last_actor_debug_info: Dict[str, Dict] = {}
         self.last_actor_action_map: Dict[str, ActorAction] = {}
+        self.last_mppi_debug_info: Dict[str, Dict] = {}
 
     def reset(self) -> None:
         if self.middle_controller is not None:
             self.middle_controller.reset()
         for tracker in self.front_rear_trackers.values():
             tracker.reset()
+        self.last_mppi_debug_info = {}
 
     def compute_commands(self, obs_dict, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, LowLevelCommand]:
         ordered_names = list(vehicle_names)
         commands = {}
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
+        self.last_mppi_debug_info = {}
         if self.middle_controller is not None:
             middle_commands = self.middle_controller.compute_commands(obs_dict, scene_frame, ordered_names)
             self.last_actor_debug_info = getattr(self.middle_controller, "last_actor_debug_info", {})
             self.last_actor_action_map = getattr(self.middle_controller, "last_actor_action_map", {})
+            self.last_mppi_debug_info = getattr(self.middle_controller, "last_mppi_debug_info", {})
             for agent_index, vehicle_name in enumerate(ordered_names):
                 if agent_index not in self._controlled_indices(len(ordered_names)) and vehicle_name in middle_commands:
                     commands[vehicle_name] = middle_commands[vehicle_name]

@@ -57,7 +57,7 @@ controller:
     device: cpu
   mppi:
     device: cpu
-    horizon_steps: 3
+    horizon_steps: 30
     num_samples: 256
     lambda: 10.0
     exploration: 0.1

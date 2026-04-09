@@ -48,6 +48,8 @@ control:
 
 controller:
   mode: pid
+  pid:
+    platoon_position_gain: 0.8
   constant:
     throttle: 0.15
     steering: 0.0

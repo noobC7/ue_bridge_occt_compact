@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import List
 
@@ -208,10 +209,12 @@ def build_demo_controller(args, cfg, vehicle_names, algo_cfg, projector=None):
             device=actor_cfg["device"],
         )
     elif controller_mode == "pid":
+        pid_cfg = controller_cfg.get("pid", {})
         middle_controller = CenterlinePIDController(
             registry=FleetRegistry(cfg.vehicle_configs),
             control_cfg=cfg.control,
             sample_interval=cfg.obs.sample_interval,
+            platoon_position_gain=pid_cfg.get("platoon_position_gain", 0.8),
         )
     elif controller_mode == "mppi":
         mppi_cfg = controller_cfg.get("mppi", {})
@@ -306,6 +309,18 @@ def print_info_summary(info) -> None:
             print(f"vehicle={vehicle_name} s={float(s_info[vehicle_name]):.4f} speed={speed}, acc:{acc}, steering:{steering}, throttle:{throttle}, steering:{steering}")
 
 
+def compute_debug_marker_duration(args, dt: float) -> float:
+    if args.plot_duration > 0:
+        return float(args.plot_duration)
+    return float(2*dt)
+
+
+def maybe_print_render_time(show_render_time: bool, label: str, step_idx: int, elapsed_sec: float) -> None:
+    if not show_render_time:
+        return
+    print(f"[RENDER] label={label} step={step_idx} cost={elapsed_sec:.6f}s ({elapsed_sec * 1000.0:.2f} ms)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Demo entry for AirSimOcctMARLEnv.reset()")
     parser.add_argument("--algo-config", default="configs/algorithm/default.yaml", help="Path to YAML file containing algorithm parameters")
@@ -319,19 +334,27 @@ def main() -> int:
     parser.add_argument("--no-pause", action="store_true")
     parser.add_argument("--preview-dim", type=int, default=16)
     parser.add_argument("--inspect-agent-index", type=int, default=0)
-    parser.add_argument("--plot-road", action="store_true")
+    parser.add_argument("--plot-road", dest="plot_road", action="store_true")
+    parser.add_argument("--no-plot-road", dest="plot_road", action="store_false")
+    parser.add_argument("--plot-marl-debug", action="store_true")
     parser.add_argument("--plot-observation-points", action="store_true")
     parser.add_argument("--plot-all-observation-points", action="store_true")
+    parser.add_argument("--plot-mppi-debug", action="store_true")
     parser.add_argument("--plot-z", type=float, default=0.0)
     parser.add_argument("--point-size", type=float, default=12.0)
     parser.add_argument("--plot-duration", type=float, default=-1.0)
     parser.add_argument("--no-align-road-start", action="store_true")
-    parser.add_argument("--step-count", type=int, default=0)
+    parser.add_argument("--step-count", type=int, default=2000)
+    parser.add_argument("--show-log", action="store_true")
+    parser.add_argument("--show-render-time", action="store_true")
     parser.add_argument("--print-obs-debug", action="store_true")
     parser.add_argument("--print-tracking-debug", action="store_true")
     parser.add_argument("--no-save-tracking-log", action="store_true")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--output-suffix", default=None)
+    parser.add_argument("--output-filename", default="tracking_log.json")
+    parser.add_argument("--use-output-dir-as-run-dir", action="store_true")
+    parser.set_defaults(plot_road=True)
     args = parser.parse_args()
 
     map_dir = Path(args.map_dir)
@@ -379,8 +402,14 @@ def main() -> int:
     print("[DEMO] Creating env...")
     env = AirSimOcctMARLEnv(cfg, road=road, transform=transform)
     tracking_recorder = None
+    initial_render_times = []
+    step_render_times = []
     if (not args.no_save_tracking_log) and args.step_count > 0:
-        output_dir = make_output_dir(args.output_dir, prefix="tracking", suffix=args.output_suffix)
+        if args.use_output_dir_as_run_dir and args.output_dir is not None:
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = make_output_dir(args.output_dir, prefix="tracking", suffix=args.output_suffix)
         tracking_recorder = TrackingLogRecorder(
             output_dir=output_dir,
             metadata={
@@ -406,10 +435,12 @@ def main() -> int:
         info = env._build_info()
         if tracking_recorder is not None:
             tracking_recorder.add_step(-1, info)
-        print_info_summary(info)
+        if args.show_log:
+            print_info_summary(info)
         if args.print_obs_debug:
             print_obs_block_summary(obs_dict, cfg.obs, agent_index=args.inspect_agent_index)
         if args.plot_road or args.plot_observation_points or args.plot_all_observation_points:
+            render_begin = time.perf_counter()
             env.io.flush_persistent_markers()
             env.render_debug_markers(
                 plot_road=args.plot_road,
@@ -430,10 +461,23 @@ def main() -> int:
                     is_persistent=True,
                     clear_existing=False,
                 )
+            if args.plot_mppi_debug and algo_cfg["controller"]["mode"] == "mppi":
+                mppi_debug_duration = compute_debug_marker_duration(args, cfg.control.dt)
+                env.render_mppi_debug_markers(
+                    getattr(demo_controller if 'demo_controller' in locals() else None, "last_mppi_debug_info", {}),
+                    plot_z=-3,
+                    duration=mppi_debug_duration,
+                    is_persistent=False,
+                    clear_existing=False,
+                )
+            render_elapsed = time.perf_counter() - render_begin
+            initial_render_times.append(render_elapsed)
+            maybe_print_render_time(args.show_render_time, "initial", -1, render_elapsed)
             print(
                 f"[DEMO] rendered debug markers: plot_road={args.plot_road} "
                 f"plot_all_observation_points={args.plot_all_observation_points} "
-                f"plot_single_observation={args.plot_observation_points and not args.plot_all_observation_points}"
+                f"plot_single_observation={args.plot_observation_points and not args.plot_all_observation_points} "
+                f"plot_mppi_debug={args.plot_mppi_debug and algo_cfg['controller']['mode'] == 'mppi'}"
             )
         if args.step_count > 0:
             demo_controller = build_demo_controller(
@@ -460,14 +504,17 @@ def main() -> int:
                 obs_dict, reward, terminated, truncated, info = env.step_with_controller(demo_controller)
                 if tracking_recorder is not None:
                     tracking_recorder.add_step(step_idx, info)
-                print(f"[DEMO] step={step_idx} done={terminated} truncated={truncated}")
-                print_info_summary(info)
+                if args.show_log:
+                    print(f"[DEMO] step={step_idx} done={terminated} truncated={truncated}")
+                    print_info_summary(info)
                 if args.print_tracking_debug:
                     print_tracking_debug(info)
                     print_actor_debug(info)
                 if args.print_obs_debug:
                     print_obs_block_summary(obs_dict, cfg.obs, agent_index=args.inspect_agent_index)
+                render_begin = None
                 if args.plot_all_observation_points:
+                    render_begin = time.perf_counter() if render_begin is None else render_begin
                     env.render_debug_markers(
                         plot_road=False,
                         plot_observation_points=True,
@@ -479,6 +526,7 @@ def main() -> int:
                         clear_existing=not args.plot_road,
                     )
                 if args.plot_observation_points and not args.plot_all_observation_points:
+                    render_begin = time.perf_counter() if render_begin is None else render_begin
                     env.plot_agent_observation_points(
                         agent_index=args.inspect_agent_index,
                         plot_z=args.plot_z,
@@ -487,24 +535,62 @@ def main() -> int:
                         is_persistent=True,
                         clear_existing=not args.plot_road,
                     )
+                if args.plot_marl_debug and controller_mode == "actor":
+                    render_begin = time.perf_counter() if render_begin is None else render_begin
+                    marl_debug_duration = compute_debug_marker_duration(args, cfg.control.dt)
+                    env.render_marl_debug_markers(
+                        getattr(demo_controller, "last_actor_debug_info", {}),
+                        plot_z=-3.0,
+                        duration=marl_debug_duration,
+                        is_persistent=False,
+                        clear_existing=False,
+                    )
+                if args.plot_mppi_debug and controller_mode == "mppi":
+                    render_begin = time.perf_counter() if render_begin is None else render_begin
+                    mppi_debug_duration = compute_debug_marker_duration(args, cfg.control.dt)
+                    env.render_mppi_debug_markers(
+                        getattr(demo_controller, "last_mppi_debug_info", {}),
+                        plot_z=-3,
+                        duration=mppi_debug_duration,
+                        is_persistent=False,
+                        clear_existing=False,
+                    )
+                if render_begin is not None:
+                    render_elapsed = time.perf_counter() - render_begin
+                    step_render_times.append(render_elapsed)
+                    maybe_print_render_time(args.show_render_time, "step", step_idx, render_elapsed)
                 is_done = any(bool(value) for value in terminated.values())
                 is_truncated = any(bool(value) for value in truncated.values())
                 if is_done or is_truncated:
                     done_reason = info.get("done_reason", "terminated" if is_done else "truncated")
                     terminal_vehicle_names = info.get("terminal_vehicle_names", [])
                     print(
-                        f"[DEMO] resetting at step={step_idx} "
+                        f"[DEMO] ending run at step={step_idx} "
                         f"reason={done_reason} terminal_vehicle_names={terminal_vehicle_names}"
                     )
-                    obs_dict, reset_info = env.reset()
-                    demo_controller.reset()
-                    print(f"[DEMO] reset() after terminal event, vehicles={reset_info.get('vehicle_names')}")
-                    if args.print_obs_debug:
-                        print_obs_summary(obs_dict, preview_dim=args.preview_dim)
-                    continue
+                    break
         if tracking_recorder is not None:
-            log_path = tracking_recorder.save()
+            log_path = tracking_recorder.save(filename=args.output_filename)
             print(f"[DEMO] tracking log saved to {log_path}")
+        if args.show_render_time and (initial_render_times or step_render_times):
+            if initial_render_times:
+                initial_np = np.asarray(initial_render_times, dtype=np.float64)
+                print(
+                    "[RENDER] initial_summary "
+                    f"count={initial_np.size} "
+                    f"mean={initial_np.mean():.6f}s "
+                    f"max={initial_np.max():.6f}s "
+                    f"total={initial_np.sum():.6f}s"
+                )
+            if step_render_times:
+                step_np = np.asarray(step_render_times, dtype=np.float64)
+                print(
+                    "[RENDER] step_summary "
+                    f"count={step_np.size} "
+                    f"mean={step_np.mean():.6f}s "
+                    f"max={step_np.max():.6f}s "
+                    f"total={step_np.sum():.6f}s"
+                )
     finally:
         env.close()
 

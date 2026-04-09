@@ -2,6 +2,7 @@ import argparse
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -26,21 +27,31 @@ def build_parser():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--plot-road", action="store_true")
+    parser.add_argument("--plot-road", dest="plot_road", action="store_true")
+    parser.add_argument("--no-plot-road", dest="plot_road", action="store_false")
+    parser.add_argument("--plot-marl-debug", action="store_true")
+    parser.add_argument("--plot-mppi-debug", action="store_true")
+    parser.add_argument("--show-log", action="store_true")
     parser.add_argument("--print-obs-debug", action="store_true")
     parser.add_argument("--print-tracking-debug", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.set_defaults(plot_road=True)
     return parser
 
 
 def build_output_suffix(method: str, road_index: int, repeat_index: int, repeats: int) -> str:
     suffix = f"{method}_road{road_index}"
-    if repeats > 1:
-        suffix = f"{suffix}_run{repeat_index}"
     return suffix
 
 
-def build_command(args, method: str, road_index: int, repeat_index: int) -> list[str]:
+def build_run_dir(output_root: Path, method: str, road_index: int) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_root / f"tracking_{timestamp}_{method}_road{road_index}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def build_command(args, method: str, road_index: int, repeat_index: int, run_dir: Path) -> list[str]:
     if method not in DEFAULT_METHOD_TO_CONFIG:
         raise KeyError(f"Unsupported method '{method}'. Supported methods: {sorted(DEFAULT_METHOD_TO_CONFIG)}")
     cmd = [
@@ -60,13 +71,22 @@ def build_command(args, method: str, road_index: int, repeat_index: int) -> list
         str(args.step_count),
         "--output-suffix",
         build_output_suffix(method, road_index, repeat_index, args.repeats),
+        "--use-output-dir-as-run-dir",
+        "--output-dir",
+        str(run_dir),
+        "--output-filename",
+        "tracking_log.json" if args.repeats == 1 else f"tracking_log_{repeat_index}.json",
     ]
-    if args.output_dir is not None:
-        cmd.extend(["--output-dir", args.output_dir])
     if args.vehicles:
         cmd.extend(["--vehicles", *args.vehicles])
-    if args.plot_road:
-        cmd.append("--plot-road")
+    if not args.plot_road:
+        cmd.append("--no-plot-road")
+    if args.plot_marl_debug:
+        cmd.append("--plot-marl-debug")
+    if args.plot_mppi_debug:
+        cmd.append("--plot-mppi-debug")
+    if args.show_log:
+        cmd.append("--show-log")
     if args.print_obs_debug:
         cmd.append("--print-obs-debug")
     if args.print_tracking_debug:
@@ -77,15 +97,24 @@ def build_command(args, method: str, road_index: int, repeat_index: int) -> list
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    output_root = Path(args.output_dir) if args.output_dir is not None else Path.cwd() / "airsim_occt_tracking_outputs"
+    output_root.mkdir(parents=True, exist_ok=True)
 
     failures = []
     total_runs = len(args.methods) * len(args.roads) * max(int(args.repeats), 1)
     run_counter = 0
     for method in args.methods:
         for road_index in args.roads:
+            run_dir = build_run_dir(output_root, method, road_index)
             for repeat_index in range(max(int(args.repeats), 1)):
                 run_counter += 1
-                cmd = build_command(args, method=method, road_index=road_index, repeat_index=repeat_index)
+                cmd = build_command(
+                    args,
+                    method=method,
+                    road_index=road_index,
+                    repeat_index=repeat_index,
+                    run_dir=run_dir,
+                )
                 print(f"\n[BATCH] run={run_counter}/{total_runs} method={method} road={road_index} repeat={repeat_index}")
                 print("[BATCH] command:", " ".join(cmd))
                 result = subprocess.run(cmd, cwd=Path(__file__).resolve().parent)

@@ -94,6 +94,261 @@ def build_world_plot_points(
     return np.concatenate([pts_world_xy, z_col], axis=1)
 
 
+def plot_mppi_debug_in_airsim(
+    io,
+    mppi_debug_info: Dict[str, Dict],
+    world_to_map: Transform2D,
+    plot_z: float = 0.0,
+    duration: float = 0.2,
+    is_persistent: bool = False,
+    clear_existing: bool = False,
+    flip_world_y: bool = False,
+) -> None:
+    if clear_existing:
+        io.flush_persistent_markers()
+    for vehicle_offset, vehicle_name in enumerate(sorted(mppi_debug_info.keys())):
+        debug = mppi_debug_info[vehicle_name]
+        z_offset = float(plot_z + 0.15 * vehicle_offset)
+        sampled_trajs = _to_numpy(debug.get("sampled_trajs", np.zeros((0, 0, 4), dtype=np.float32)))
+        ref_points = _to_numpy(debug.get("ref_points", np.zeros((0, 2), dtype=np.float32)))
+        optimal_traj = _to_numpy(debug.get("optimal_traj", np.zeros((0, 4), dtype=np.float32)))
+
+        for traj in sampled_trajs:
+            if traj.shape[0] == 0:
+                continue
+            world_traj = build_world_plot_points(
+                traj[:, :2],
+                world_to_map=world_to_map,
+                plot_z=z_offset,
+                flip_world_y=flip_world_y,
+            )
+            io.plot_line_strip_world(
+                world_traj,
+                color_rgba=[0.10, 0.70, 0.95, 0.12],
+                thickness=1.0,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+
+        if ref_points.shape[0] > 0:
+            world_ref = build_world_plot_points(
+                ref_points,
+                world_to_map=world_to_map,
+                plot_z=z_offset + 0.03,
+                flip_world_y=flip_world_y,
+            )
+            io.plot_line_strip_world(
+                world_ref,
+                color_rgba=[0.95, 0.78, 0.15, 1.0],
+                thickness=3.0,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+            io.plot_points_world(
+                world_ref,
+                color_rgba=[0.95, 0.78, 0.15, 1.0],
+                size=8.0,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+
+        if optimal_traj.shape[0] > 0:
+            world_opt = build_world_plot_points(
+                optimal_traj[:, :2],
+                world_to_map=world_to_map,
+                plot_z=z_offset + 0.06,
+                flip_world_y=flip_world_y,
+            )
+            io.plot_line_strip_world(
+                world_opt,
+                color_rgba=[0.15, 0.95, 0.35, 1.0],
+                thickness=3.0,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+            io.plot_points_world(
+                world_opt,
+                color_rgba=[0.15, 0.95, 0.35, 1.0],
+                size=7.0,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+
+
+def _accel_to_color_rgba(accel: float, max_accel: float) -> list[float]:
+    max_accel = max(float(max_accel), 1e-6)
+    normalized = float(np.clip(accel / max_accel, -1.0, 1.0))
+    t = 0.5 * (normalized + 1.0)
+    if t <= 0.5:
+        local = t / 0.5
+        return [1.0, local, 0.0, 1.0]
+    local = (t - 0.5) / 0.5
+    return [1.0 - local, 1.0, 0.0, 1.0]
+
+
+def _build_curved_arrow_map(
+    origin_map_xy: np.ndarray,
+    yaw_map: float,
+    steering_angle_rad: float,
+    wheelbase: float,
+    arrow_length: float,
+    num_points: int = 16,
+) -> np.ndarray:
+    s_samples = np.linspace(0.0, float(arrow_length), num=max(int(num_points), 2), dtype=np.float32)
+    curvature = float(np.tan(float(steering_angle_rad)) / max(float(wheelbase), 1e-6))
+    if abs(curvature) < 1e-6:
+        local_xy = np.stack([s_samples, np.zeros_like(s_samples)], axis=-1)
+    else:
+        local_xy = np.stack(
+            [
+                np.sin(curvature * s_samples) / curvature,
+                (1.0 - np.cos(curvature * s_samples)) / curvature,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+    cos_yaw = float(np.cos(yaw_map))
+    sin_yaw = float(np.sin(yaw_map))
+    rot = np.asarray([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]], dtype=np.float32)
+    return (local_xy @ rot.T) + np.asarray(origin_map_xy, dtype=np.float32)
+
+
+def _build_arrow_head_world(curve_world_xyz: np.ndarray, head_length: float = 0.8, head_angle_deg: float = 25.0) -> np.ndarray:
+    if curve_world_xyz.shape[0] < 2:
+        return np.zeros((0, 3), dtype=np.float32)
+    end = np.asarray(curve_world_xyz[-1], dtype=np.float32)
+    prev = np.asarray(curve_world_xyz[-2], dtype=np.float32)
+    direction = end[:2] - prev[:2]
+    norm = float(np.linalg.norm(direction))
+    if norm <= 1e-6:
+        return np.zeros((0, 3), dtype=np.float32)
+    direction = direction / norm
+    theta = float(np.deg2rad(head_angle_deg))
+    rot_left = np.asarray(
+        [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]],
+        dtype=np.float32,
+    )
+    rot_right = np.asarray(
+        [[np.cos(-theta), -np.sin(-theta)], [np.sin(-theta), np.cos(-theta)]],
+        dtype=np.float32,
+    )
+    left = end[:2] - head_length * (direction @ rot_left.T)
+    right = end[:2] - head_length * (direction @ rot_right.T)
+    z_val = float(end[2])
+    return np.asarray(
+        [
+            [end[0], end[1], z_val],
+            [left[0], left[1], z_val],
+            [end[0], end[1], z_val],
+            [right[0], right[1], z_val],
+        ],
+        dtype=np.float32,
+    )
+
+
+def plot_marl_debug_in_airsim(
+    io,
+    scene_frame,
+    registry,
+    actor_debug_info: Dict[str, Dict],
+    world_to_map: Transform2D,
+    plot_z: float = -3.0,
+    duration: float = 0.2,
+    is_persistent: bool = False,
+    clear_existing: bool = False,
+    flip_world_y: bool = False,
+) -> None:
+    if clear_existing:
+        io.flush_persistent_markers()
+    if scene_frame is None or not actor_debug_info:
+        return
+    controlled_vehicle_names = [
+        vehicle_name
+        for vehicle_name in sorted(actor_debug_info.keys())
+        if 0 < registry.index_of(vehicle_name) < (registry.n_agents - 1)
+    ]
+    for vehicle_offset, vehicle_name in enumerate(controlled_vehicle_names):
+        agent_index = registry.index_of(vehicle_name)
+        state = scene_frame.states[agent_index]
+        projection = scene_frame.projections[agent_index]
+        vehicle_cfg = registry.config_of(agent_index)
+        debug = actor_debug_info[vehicle_name]
+        z_offset = float(plot_z - 0.12 * vehicle_offset)
+        boundary_z_offset = -1
+        left_pts_world = build_world_plot_points(
+            projection.left_boundary_pts,
+            world_to_map=world_to_map,
+            plot_z=boundary_z_offset,
+            flip_world_y=flip_world_y,
+        )
+        right_pts_world = build_world_plot_points(
+            projection.right_boundary_pts,
+            world_to_map=world_to_map,
+            plot_z=boundary_z_offset,
+            flip_world_y=flip_world_y,
+        )
+        ref_pts_world = build_world_plot_points(
+            projection.short_term_ref[:, :2],
+            world_to_map=world_to_map,
+            plot_z=z_offset + 0.03,
+            flip_world_y=flip_world_y,
+        )
+        io.plot_points_world(
+            left_pts_world,
+            color_rgba=[0.05, 0.35, 1.0, 1.0],
+            size=8.0,
+            duration=duration,
+            is_persistent=is_persistent,
+        )
+        io.plot_points_world(
+            right_pts_world,
+            color_rgba=[1.0, 0.15, 0.15, 1.0],
+            size=8.0,
+            duration=duration,
+            is_persistent=is_persistent,
+        )
+        io.plot_points_world(
+            ref_pts_world,
+            color_rgba=[1.0, 0.92, 0.15, 1.0],
+            size=9.0,
+            duration=duration,
+            is_persistent=is_persistent,
+        )
+
+        arrow_curve_map = _build_curved_arrow_map(
+            origin_map_xy=state.pose_map_xy,
+            yaw_map=state.yaw_map,
+            steering_angle_rad=float(debug.get("front_wheel_angle_rad", 0.0)),
+            wheelbase=float(vehicle_cfg.l_f + vehicle_cfg.l_r),
+            arrow_length=4.0,
+        )
+        arrow_curve_world = build_world_plot_points(
+            arrow_curve_map,
+            world_to_map=world_to_map,
+            plot_z=z_offset + 0.08,
+            flip_world_y=flip_world_y,
+        )
+        accel_color = _accel_to_color_rgba(
+            accel=float(debug.get("acceleration_mps2", 0.0)),
+            max_accel=float(max(abs(debug.get("acceleration_mps2", 0.0)), 3.0)),
+        )
+        io.plot_line_strip_world(
+            arrow_curve_world,
+            color_rgba=accel_color,
+            thickness=3.5,
+            duration=duration,
+            is_persistent=is_persistent,
+        )
+        arrow_head_world = _build_arrow_head_world(arrow_curve_world)
+        if arrow_head_world.shape[0] > 0:
+            io.plot_line_list_world(
+                arrow_head_world,
+                color_rgba=accel_color,
+                thickness=3.5,
+                duration=duration,
+                is_persistent=is_persistent,
+            )
+
+
 def plot_agent_observation_points_in_airsim(
     io,
     projection,

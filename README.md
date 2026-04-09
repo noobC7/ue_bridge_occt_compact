@@ -47,7 +47,7 @@ ue_bridge_occt_compact/
 ├── airsim_occt_history.py          # 历史状态管理
 ├── airsim_occt_geometry.py         # 几何计算工具
 ├── airsim_occt_transform.py        # 坐标转换
-├── airsim_occt_plot_actor_log.py   # 日志可视化工具
+├── airsim_occt_plot_actor_log.py   # 统一的日志统计/绘图脚本
 ├── configs/                        # 配置文件目录
 │   └── algorithm/                 # 算法配置
 │       ├── default.yaml           # 默认MARL配置
@@ -119,6 +119,15 @@ python airsim_occt_smoke_test.py \
 
 ### 单次运行
 
+说明：
+- `--plot-road` 现在默认开启，若不想在 AirSim 中画道路，可显式传 `--no-plot-road`
+- `--show-log` 默认关闭，只在需要逐步打印 step 日志时开启
+- `--show-render-time` 默认关闭，只在需要统计 AirSim 绘制耗时时开启
+- `--step-count` 默认是 `2000`
+- 当前单次 run 在以下任一条件满足时结束并保存：
+  - 达到最大步长 `step-count`
+  - 触发终点 `goal_reached`
+
 #### MARL
 
 ```bash
@@ -127,10 +136,22 @@ python airsim_occt_env_demo.py \
   --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
   --road-env-index 1 \
   --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
-  --step-count 200 \
-  --plot-road \
+  --step-count 2000 \
   --output-suffix marl_road1
 ```
+
+如果希望查看 MARL 的实时特色可视化，可增加：
+
+```bash
+--plot-marl-debug
+```
+
+该模式会在 AirSim 中为中间三辆 follower 实时绘制：
+- 感知到的左右边界点
+- `ref_short_term` 参考轨迹点
+- Actor 输出动作箭头
+  - 曲率由转向角计算
+  - 颜色表示加速度（红色减速，绿色加速）
 
 #### PID
 
@@ -140,9 +161,16 @@ python airsim_occt_env_demo.py \
   --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
   --road-env-index 1 \
   --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
-  --step-count 200 \
-  --plot-road \
+  --step-count 2000 \
   --output-suffix pid_road1
+```
+
+当前部署侧 PID 纵向控制已改成**弧长位置反馈**，不再只是单纯跟踪前车速度：
+
+```yaml
+controller:
+  pid:
+    platoon_position_gain: 0.8
 ```
 
 #### MPPI
@@ -153,14 +181,35 @@ python airsim_occt_env_demo.py \
   --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
   --road-env-index 1 \
   --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
-  --step-count 200 \
-  --plot-road \
+  --step-count 2000 \
   --output-suffix mppi_road1
+```
+
+如果希望查看 MPPI 的实时规划调试曲线，可增加：
+
+```bash
+--plot-mppi-debug
+```
+
+该模式会在 AirSim 中为每个 follower 实时绘制：
+- `ref_points`
+- `sampled_trajs`
+- `optimal_traj`
+
+当前 `mppi_baseline.yaml` 已将 horizon 调整为更接近 `occt_scenario.py` 的设置：
+
+```yaml
+controller:
+  mppi:
+    horizon_steps: 30
+    num_samples: 256
+    lambda: 10.0
+    exploration: 0.1
 ```
 
 ### 日志命名
 
-```yaml
+```text
 tracking_YYYYMMDD_HHMMSS_<method>_roadX
 ```
 
@@ -168,6 +217,15 @@ tracking_YYYYMMDD_HHMMSS_<method>_roadX
 
 ```text
 tracking_20260408_220104_pid_road0
+```
+
+当 `--repeats > 1` 时，同一个 `method-road` 组合会生成一个目录，目录内保存多个独立 run 的日志文件：
+
+```text
+tracking_20260409_120000_pid_road0/
+├── tracking_log_0.json
+├── tracking_log_1.json
+└── tracking_log_2.json
 ```
 
 ## 批量测试
@@ -180,9 +238,33 @@ python airsim_occt_batch_eval.py \
   --roads 0 1 2 3 4 5 \
   --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
   --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
-  --step-count 200 \
+  --step-count 2000 \
   --output-dir /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs
 ```
+
+当前批量测试的默认行为：
+- `--plot-road` 默认开启
+- `--plot-marl-debug` 默认关闭
+- `--plot-mppi-debug` 默认关闭
+- `--show-log` 默认关闭
+
+如果希望每个 `method-road` 组合重复多次独立运行：
+
+```bash
+python airsim_occt_batch_eval.py \
+  --methods pid mppi marl \
+  --roads 0 1 2 3 4 5 \
+  --repeats 3 \
+  --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
+  --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
+  --step-count 2000 \
+  --output-dir /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs
+```
+
+`--repeats` 的语义是：
+- 同一个 `method-road` 组合对应一个输出目录
+- 每个独立 run 会单独保存一个 `tracking_log_i.json`
+- 每个独立 run 在达到终点或超过最大步长后立即结束并保存
 
 如果希望某条路失败后继续后面的组合，追加：
 
@@ -190,33 +272,68 @@ python airsim_occt_batch_eval.py \
 --continue-on-error
 ```
 
-## 日志绘图
+## 日志统计与绘图
 
-统一使用一个脚本绘制 actor 和铰接状态图：
+统一使用一个脚本处理：
+- 单个 tracking log 的时序图
+- 整个 `airsim_occt_tracking_outputs/` 根目录下的 CSV 指标统计
 
-```bash
-python airsim_occt_plot_actor_log.py \
-  --log-file /path/to/tracking_log.json \
-  --modes actor hinge
-```
-
-只画 actor：
+### 单个 log 绘图
 
 ```bash
 python airsim_occt_plot_actor_log.py \
-  --log-file /path/to/tracking_log.json \
-  --modes actor
+  --log-file /path/to/tracking_log.json
 ```
 
-只画铰接状态：
+对于单个 log：
+- `PID` 会绘制中间三车的 `pid_timeseries`
+- `MPPI` 会绘制中间三车的 `mppi_timeseries`
+- `MARL` 会绘制中间三车的 `marl_timeseries`
+- 还会额外生成：
+  - `hinge_state_timeline.png`
+  - `controller_compute_time.png`
+
+### 根目录批量出表
 
 ```bash
 python airsim_occt_plot_actor_log.py \
-  --log-file /path/to/tracking_log.json \
-  --modes hinge
+  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs \
+  --csv-only
 ```
 
-输出图保存在对应 tracking 目录下的 `plots/` 子目录。
+会在根目录下生成：
+- `tracking_metrics_runs.csv`
+- `tracking_metrics_summary.csv`
+
+脚本会自动扫描以下文件：
+- `tracking_log.json`
+- `tracking_log_*.json`
+
+### 根目录批量出表并给每个 run 生成图
+
+```bash
+python airsim_occt_plot_actor_log.py \
+  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs \
+  --generate-plots
+```
+
+当前 CSV 指标会统计一批与上游 `occt_metrics_evaluation.py` 命名风格接近的指标，例如：
+- `s_error_mean / std / max`
+- `ttc_global_min`
+- `acc_mean / std / max`
+- `jerk_mean / std / max`
+- `ste_rate_mean / std / max`
+- `hinge_ratio_mean`
+- `hinge_ready_ratio_mean`
+- `occt_ratio_mean`
+- `controller_compute_time_ms_mean / std / max / total`
+
+注意：
+- `controller_compute_time_ms` 是**每一步控制器计算耗时**
+- 它记录在 `tracking_log.json` 的每一步 `info` 中
+- 适用于比较 `PID / MPPI / MARL` 三种算法的实时性
+
+输出图保存在对应 tracking 目录下的 `plots/` 子目录；CSV 直接生成在指定根目录下。
 
 ## 训练和部署
 

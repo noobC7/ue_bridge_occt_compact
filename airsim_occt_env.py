@@ -1,4 +1,5 @@
 import time
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -10,7 +11,13 @@ from airsim_occt_fleet_registry import FleetRegistry
 from airsim_occt_history import ObservationHistory
 from airsim_occt_map_projector import OcctMapProjector
 from airsim_occt_obs_manifest import build_obs_layout
-from airsim_occt_plotting import plot_agent_observation_points_in_airsim, plot_all_agent_observation_points_in_airsim, plot_selected_road_in_airsim
+from airsim_occt_plotting import (
+    plot_marl_debug_in_airsim,
+    plot_agent_observation_points_in_airsim,
+    plot_all_agent_observation_points_in_airsim,
+    plot_mppi_debug_in_airsim,
+    plot_selected_road_in_airsim,
+)
 from airsim_occt_schema import ActorAction, SceneFrame, Transform2D
 from airsim_occt_shared_obs_core import SharedObsCore
 from airsim_occt_transform import WorldToMapTransformer
@@ -134,19 +141,29 @@ class AirSimOcctMARLEnv:
         if self.scene_frame is None:
             raise RuntimeError("reset() must be called before step_with_controller()")
         obs_dict = self._build_obs()
+        compute_begin = time.perf_counter()
         command_map = deployment_controller.compute_commands(
             obs_dict=obs_dict,
             scene_frame=self.scene_frame,
             vehicle_names=self.registry.vehicle_names,
         )
+        controller_compute_time_sec = time.perf_counter() - compute_begin
         actor_actions = self._extract_actor_actions_from_controller(deployment_controller)
         result = self.step_low_level(command_map, actor_actions=actor_actions)
+        result[4]['controller_compute_time_sec'] = float(controller_compute_time_sec)
+        result[4]['controller_compute_time_ms'] = float(controller_compute_time_sec * 1000.0)
+        controller_metadata = getattr(deployment_controller, 'metadata', None)
+        if controller_metadata is not None:
+            result[4]['controller_metadata'] = controller_metadata
         controller_debug = getattr(deployment_controller, 'last_debug_info', None)
         if controller_debug:
             result[4]['controller_debug'] = controller_debug
         actor_debug = getattr(deployment_controller, 'last_actor_debug_info', None)
         if actor_debug:
             result[4]['actor_debug'] = actor_debug
+        mppi_debug = getattr(deployment_controller, 'last_mppi_debug_info', None)
+        if mppi_debug:
+            result[4]['mppi_debug'] = mppi_debug
         return result
 
     def close(self) -> None:
@@ -267,6 +284,50 @@ class AirSimOcctMARLEnv:
                 is_persistent=is_persistent,
                 clear_existing=clear_existing,
             )
+
+    def render_mppi_debug_markers(
+        self,
+        mppi_debug_info: Dict[str, Dict],
+        plot_z: float = 0.0,
+        duration: float = 0.2,
+        is_persistent: bool = False,
+        clear_existing: bool = False,
+    ) -> None:
+        if not mppi_debug_info:
+            return
+        plot_mppi_debug_in_airsim(
+            io=self.io,
+            mppi_debug_info=mppi_debug_info,
+            world_to_map=self.transform,
+            plot_z=plot_z,
+            duration=duration,
+            is_persistent=is_persistent,
+            clear_existing=clear_existing,
+            flip_world_y=self.flip_world_y,
+        )
+
+    def render_marl_debug_markers(
+        self,
+        actor_debug_info: Dict[str, Dict],
+        plot_z: float = -3.0,
+        duration: float = 0.2,
+        is_persistent: bool = False,
+        clear_existing: bool = False,
+    ) -> None:
+        if not actor_debug_info:
+            return
+        plot_marl_debug_in_airsim(
+            io=self.io,
+            scene_frame=self.scene_frame,
+            registry=self.registry,
+            actor_debug_info=actor_debug_info,
+            world_to_map=self.transform,
+            plot_z=plot_z,
+            duration=duration,
+            is_persistent=is_persistent,
+            clear_existing=clear_existing,
+            flip_world_y=self.flip_world_y,
+        )
 
     def _canonicalize(self, raw_states):
         states = []

@@ -19,5 +19,6 @@ __pycache__/
 .pytest_cache/
 
 /airsim_occt_tracking_outputs/
+/airsim_occt_tracking_outputs_*/
 *.zip
 /readme.txt

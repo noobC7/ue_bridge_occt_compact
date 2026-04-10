@@ -875,11 +875,13 @@ class FrontRearCooperativeController(BaseDeploymentController):
     def compute_commands(self, obs_dict, scene_frame, vehicle_names: Iterable[str]) -> Dict[str, LowLevelCommand]:
         ordered_names = list(vehicle_names)
         commands = {}
+        self.last_debug_info = {}
         self.last_actor_debug_info = {}
         self.last_actor_action_map = {}
         self.last_mppi_debug_info = {}
         if self.middle_controller is not None:
             middle_commands = self.middle_controller.compute_commands(obs_dict, scene_frame, ordered_names)
+            self.last_debug_info = getattr(self.middle_controller, "last_debug_info", {})
             self.last_actor_debug_info = getattr(self.middle_controller, "last_actor_debug_info", {})
             self.last_actor_action_map = getattr(self.middle_controller, "last_actor_action_map", {})
             self.last_mppi_debug_info = getattr(self.middle_controller, "last_mppi_debug_info", {})
@@ -887,7 +889,6 @@ class FrontRearCooperativeController(BaseDeploymentController):
                 if agent_index not in self._controlled_indices(len(ordered_names)) and vehicle_name in middle_commands:
                     commands[vehicle_name] = middle_commands[vehicle_name]
         ref_targets = self.planner.plan(scene_frame, ordered_names)
-        self.last_debug_info = {}
         for vehicle_name, target in ref_targets.items():
             state = scene_frame.states[target.agent_index]
             command, debug = self.front_rear_trackers[target.agent_index].compute_command(state, target)

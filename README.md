@@ -286,6 +286,9 @@ python airsim_occt_batch_eval.py \
   - `closest_center_map`
   - `hinge_target_speed`
 - 这样做是为了避免兼容逻辑掩盖真实问题；重新跑测试后再做统计与绘图
+- `hinge_distance` 是唯一例外：
+  - 新日志若已写入则直接使用
+  - 像 `0410` 这类未落盘该字段的日志，会在绘图时根据 `pose_map_xy` 和首尾车 `closest_center_map` 现场重建
 
 ### 单个 log 绘图
 
@@ -299,10 +302,14 @@ python airsim_occt_plot_actor_log.py \
 - `MPPI` 会绘制中间三车的 `mppi_timeseries`
 - `MARL` 会绘制中间三车的 `marl_timeseries`
 - 还会额外生成：
-  - `hinge_state_timeline.png`
-  - `controller_compute_time.png`
-  - `platoon_longitudinal_error.png`
-  - `platoon_lateral_error.png`
+  - `hinge_state_timeline.pdf`
+  - `controller_compute_time.pdf`
+  - `platoon_longitudinal_error.pdf`
+  - `platoon_lateral_error.pdf`
+  - `group_trajectory.pdf`
+  - `group_target_acc.pdf`
+  - `group_speed.pdf`
+  - `group_policy_delta.pdf`
 
 对于 `MARL / MPPI` 的 steering 子图：
 - 现在只绘制两条曲线：
@@ -314,7 +321,7 @@ python airsim_occt_plot_actor_log.py \
 
 ```bash
 python airsim_occt_plot_actor_log.py \
-  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs \
+  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs/0410 \
   --csv-only
 ```
 
@@ -334,7 +341,7 @@ python airsim_occt_plot_actor_log.py \
 
 ```bash
 python airsim_occt_plot_actor_log.py \
-  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs/0409 \
+  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs/0410 \
   --generate-plots
 ```
 
@@ -376,18 +383,40 @@ python airsim_occt_plot_actor_log.py \
 ### 论文分析相关绘图
 
 对于每个单独 run，脚本会额外生成：
-- `platoon_longitudinal_error.png`
+- `platoon_longitudinal_error.pdf`
   - 三个 follower 的编队纵向误差曲线
   - 背景透明色标注各 follower 的 `hinge_ready_status=True` 时段
-- `platoon_lateral_error.png`
+- `platoon_lateral_error.pdf`
   - 三个 follower 的横向误差曲线
   - 背景透明色同样标注 `hinge_ready_status=True` 时段
-- `controller_compute_time.png`
+- `controller_compute_time.pdf`
   - 当前 run 的控制器计算时间曲线
+- `hinge_state_timeline.pdf`
+  - 仅显示中间三辆 follower
+  - 中文图例：`可铰接`、`铰接点距离`、`铰接完成`
+  - `可铰接` 以背景透明色块表示，且阴影只覆盖 `y∈[0,1]`
+  - 左轴绘制 `铰接点距离 (m)`，右轴绘制 `铰接完成 (0/1)`，两侧刻度颜色与对应曲线一致
+  - 如果日志里没有 `hinge_distance`，脚本会按首尾车中心线插值位置离线重建后再绘制
+  - `铰接完成` 曲线从首次满足 `hinge_ready_status && occt_state` 的时刻开始保持为 1
+- `group_trajectory.pdf`
+  - 三个 follower 的轨迹对比图
+  - 会叠加当前道路的左右边界，左边界为蓝色、右边界为红色
+  - 对 `road3 / road4 / road5` 会自动交换 `x/y` 并按画布宽高比重设坐标范围，以避免长条形轨迹图
+  - 主轨迹线会使用更细的线宽，减轻重叠遮挡
+  - `road0` 到 `road5` 使用固定的局部放大框配置，不再自动选点
+  - 每条路都会按预设的源矩形区域、放大框中心位置和 `2x` 放大倍率生成一个或多个 inset，且 inset 不显示坐标刻度
+  - 源框只保留矩形标注，不再绘制源框到 inset 的连接线
+- `group_target_acc.pdf`
+  - 三个 follower 的目标加速度对比图（PID 使用重建的加速度）
+- `group_speed.pdf`
+  - 三个 follower 的速度对比图
+- `group_policy_delta.pdf`
+  - 三个 follower 的目标转角对比图（PID 使用 `command_delta`）
 
 当对整个根目录执行 `--generate-plots` 时，还会在根目录额外生成：
-- `controller_compute_time_boxplot.png`
+- `controller_compute_time_boxplot.pdf`
   - 所有场景下三种方法控制器计算时间的箱线图对比
+  - 使用对数纵轴，便于展示 MPPI 与 MARL/PID 的数量级差异
 
 ## 训练和部署
 

@@ -450,7 +450,13 @@ class AirSimOcctMARLEnv:
         hinge_ready_status = self.history.hinge_status.astype(bool).tolist()
         occt_state = self._build_occt_state()
         target_agent_s = self.obs_core._get_dynamic_target_arc_positions(self.history.agent_s)
+        hinge_target_point_map = self.history.hinge_short_term[:, 0, :2]
         hinge_target_speed = np.linalg.norm(self.history.hinge_short_term[:, 0, 2:4], axis=-1)
+        hinge_distance = np.linalg.norm(
+            np.asarray([state.pose_map_xy for state in self.scene_frame.states], dtype=np.float32)
+            - np.asarray(hinge_target_point_map, dtype=np.float32),
+            axis=-1,
+        )
         return {
             "s": {vehicle_name: float(self.scene_frame.projections[index].s) for index, vehicle_name in self.registry.ordered_pairs()},
             "pose_map_xy": {
@@ -487,6 +493,10 @@ class AirSimOcctMARLEnv:
             },
             "hinge_target_speed": {
                 vehicle_name: float(hinge_target_speed[index])
+                for index, vehicle_name in self.registry.ordered_pairs()
+            },
+            "hinge_distance": {
+                vehicle_name: float(hinge_distance[index])
                 for index, vehicle_name in self.registry.ordered_pairs()
             },
             "road_s_max": float(self.projector.s_max),

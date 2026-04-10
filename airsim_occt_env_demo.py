@@ -417,7 +417,7 @@ def main() -> int:
                 "map_dir": str(map_dir),
                 "road_env_index": int(args.road_env_index),
                 "output_suffix": args.output_suffix,
-                "method": algo_cfg.get("controller", {}).get("mode"),
+                "method": "marl" if algo_cfg.get("controller", {}).get("mode") == "actor" else algo_cfg.get("controller", {}).get("mode"),
                 "road_metadata": metadata,
                 "algorithm_config_path": str(algo_config_path),
                 "algorithm_config": algo_cfg,

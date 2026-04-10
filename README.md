@@ -239,7 +239,7 @@ python airsim_occt_batch_eval.py \
   --map-dir /home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/chapter4_6_path \
   --vehicles vehicle0 vehicle1 vehicle2 vehicle3 vehicle4 \
   --step-count 2000 \
-  --output-dir /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs
+  --output-dir /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs/0410
 ```
 
 当前批量测试的默认行为：
@@ -278,6 +278,15 @@ python airsim_occt_batch_eval.py \
 - 单个 tracking log 的时序图
 - 整个 `airsim_occt_tracking_outputs/` 根目录下的 CSV 指标统计
 
+注意：
+- 当前统计/绘图脚本**只支持新日志格式**
+- 如果日志缺少以下字段，会直接报错，不再兼容旧日志：
+  - `target_agent_s`
+  - `distance_to_ref`
+  - `closest_center_map`
+  - `hinge_target_speed`
+- 这样做是为了避免兼容逻辑掩盖真实问题；重新跑测试后再做统计与绘图
+
 ### 单个 log 绘图
 
 ```bash
@@ -292,6 +301,14 @@ python airsim_occt_plot_actor_log.py \
 - 还会额外生成：
   - `hinge_state_timeline.png`
   - `controller_compute_time.png`
+  - `platoon_longitudinal_error.png`
+  - `platoon_lateral_error.png`
+
+对于 `MARL / MPPI` 的 steering 子图：
+- 现在只绘制两条曲线：
+  - 算法输出角（`policy_delta` / `command_delta`）
+  - 根据控制参数在绘图时重建的一阶惯性估计值（`estimated_delta`）
+- `estimated_delta` 不再存储在日志中，而是绘图时动态计算
 
 ### 根目录批量出表
 
@@ -304,6 +321,10 @@ python airsim_occt_plot_actor_log.py \
 会在根目录下生成：
 - `tracking_metrics_runs.csv`
 - `tracking_metrics_summary.csv`
+- `tracking_metrics_roundabout.csv`
+- `tracking_metrics_right_angle_turn.csv`
+- `tracking_metrics_s_curve.csv`
+- `tracking_metrics_overall.csv`
 
 脚本会自动扫描以下文件：
 - `tracking_log.json`
@@ -313,7 +334,7 @@ python airsim_occt_plot_actor_log.py \
 
 ```bash
 python airsim_occt_plot_actor_log.py \
-  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs \
+  --log-file /home/yons/Graduation/ue_bridge_occt_compact/airsim_occt_tracking_outputs/0409 \
   --generate-plots
 ```
 
@@ -323,6 +344,9 @@ python airsim_occt_plot_actor_log.py \
 - `acc_mean / std / max`
 - `jerk_mean / std / max`
 - `ste_rate_mean / std / max`
+- `hinge_time`
+- `hinge_count`
+- `hinge_spe_diff`
 - `hinge_ratio_mean`
 - `hinge_ready_ratio_mean`
 - `occt_ratio_mean`
@@ -334,6 +358,36 @@ python airsim_occt_plot_actor_log.py \
 - 适用于比较 `PID / MPPI / MARL` 三种算法的实时性
 
 输出图保存在对应 tracking 目录下的 `plots/` 子目录；CSV 直接生成在指定根目录下。
+
+各 CSV 的含义：
+- `tracking_metrics_runs.csv`
+  - 每个独立 run 一行
+- `tracking_metrics_summary.csv`
+  - 按 `method + road_id` 聚合，一条道路上每种方法一行
+- `tracking_metrics_roundabout.csv`
+  - 将 `road0` 和 `road1` 按场景类型 `roundabout` 聚合，每种方法一行
+- `tracking_metrics_right_angle_turn.csv`
+  - 将 `road2` 和 `road3` 按场景类型 `right_angle_turn` 聚合，每种方法一行
+- `tracking_metrics_s_curve.csv`
+  - 将 `road4` 和 `road5` 按场景类型 `s_curve` 聚合，每种方法一行
+- `tracking_metrics_overall.csv`
+  - 将所有道路整体聚合，每种方法一行
+
+### 论文分析相关绘图
+
+对于每个单独 run，脚本会额外生成：
+- `platoon_longitudinal_error.png`
+  - 三个 follower 的编队纵向误差曲线
+  - 背景透明色标注各 follower 的 `hinge_ready_status=True` 时段
+- `platoon_lateral_error.png`
+  - 三个 follower 的横向误差曲线
+  - 背景透明色同样标注 `hinge_ready_status=True` 时段
+- `controller_compute_time.png`
+  - 当前 run 的控制器计算时间曲线
+
+当对整个根目录执行 `--generate-plots` 时，还会在根目录额外生成：
+- `controller_compute_time_boxplot.png`
+  - 所有场景下三种方法控制器计算时间的箱线图对比
 
 ## 训练和部署
 
